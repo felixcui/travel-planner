@@ -2,7 +2,8 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { del, get, set } from "idb-keyval";
 import { ArrowDown, ArrowRight, ArrowUp, BedDouble, BookOpenText, CarFront, Check, ChevronRight, CircleAlert, Clock3, Download, ExternalLink, GripVertical, LoaderCircle, Map, MapPinned, Plus, RefreshCw, Route, Share2, Sparkles, Trash2, UsersRound, X } from "lucide-react";
 import type { Activity, DayPlan, Place, Plan, TripBundle, TripRequest } from "@/lib/domain";
@@ -52,7 +53,7 @@ function CreateForm({ onGenerated }: { onGenerated: (bundle: TripBundle) => void
   }
 
   return <main className="create-shell">
-    <header className="brand-header"><div className="brand-mark"><Route /></div><div><span>ROADBOOK / 01</span><strong>去野</strong></div><Link href="/admin">运营台</Link></header>
+    <header className="brand-header"><div className="brand-mark"><Route /></div><div><span>ROADBOOK / 01</span><strong>去野</strong></div><nav><Link href="/trips"><BookOpenText />我的行程</Link><Link href="/admin">运营台</Link></nav></header>
     <section className="hero-copy"><div className="eyebrow"><span />智能自驾旅行规划</div><h1>把想去的地方，<br /><em>排成真正走得通的旅程。</em></h1><p>路线、车程、玩法和住宿，一张地图里安排明白。</p></section>
     <form className="planning-form" onSubmit={submit}>
       <div className="form-lead"><span>01</span><div><h2>从哪里出发去玩？</h2><p>这里只规划目的地内的自驾行程，不含飞机和火车。</p></div></div>
@@ -86,6 +87,7 @@ function CreateForm({ onGenerated }: { onGenerated: (bundle: TripBundle) => void
 function downloadBlob(blob: Blob, filename: string) { const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = filename; anchor.click(); URL.revokeObjectURL(url); }
 
 export default function PlannerApp({ initialBundle, readOnly = false }: { initialBundle?: TripBundle; readOnly?: boolean }) {
+  const router = useRouter();
   const [bundle, setBundle] = useState<TripBundle | null>(initialBundle ?? null);
   const [selectedDayId, setSelectedDayId] = useState<string>();
   const [selectedPlaceId, setSelectedPlaceId] = useState<string>();
@@ -93,9 +95,33 @@ export default function PlannerApp({ initialBundle, readOnly = false }: { initia
   const [working, setWorking] = useState("");
   const [notice, setNotice] = useState("");
   const [newPlace, setNewPlace] = useState("");
+  const [saveState, setSaveState] = useState<"saving" | "saved" | "error">("saved");
+  const latestBundle = useRef<TripBundle | null>(bundle);
+  const saveTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => { if (!initialBundle && !readOnly) get<TripBundle>(DRAFT_KEY).then((draft) => draft && setBundle(draft)); }, [initialBundle, readOnly]);
-  useEffect(() => { if (bundle && !readOnly) set(DRAFT_KEY, bundle); }, [bundle, readOnly]);
+  useEffect(() => {
+    latestBundle.current = bundle;
+    if (!bundle || readOnly) return;
+    set(DRAFT_KEY, bundle);
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(async () => {
+      setSaveState("saving");
+      try {
+        const response = await fetch(`/api/trips/${bundle.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bundle) });
+        if (!response.ok) throw new Error("自动保存失败");
+        setSaveState("saved");
+      } catch {
+        setSaveState("error");
+        setNotice("自动保存失败，请稍后重试");
+      }
+    }, 500);
+  }, [bundle, readOnly]);
+  useEffect(() => () => {
+    window.clearTimeout(saveTimer.current);
+    const current = latestBundle.current;
+    if (current && !readOnly) fetch(`/api/trips/${current.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(current), keepalive: true }).catch(() => undefined);
+  }, [readOnly]);
   const plan = useMemo(() => bundle?.plans.find((item) => item.id === bundle.selectedPlanId) ?? bundle?.plans[0], [bundle]);
   const selectedDay = plan?.days.find((day) => day.id === selectedDayId) ?? plan?.days[0];
   const selectedActivity = selectedDay?.activities.find((activity) => activity.place.id === selectedPlaceId);
@@ -131,9 +157,9 @@ export default function PlannerApp({ initialBundle, readOnly = false }: { initia
 
   return <main className="planner-shell">
     <aside className="itinerary-panel">
-      <header className="planner-brand"><button aria-label="返回创建" onClick={() => { if (!readOnly) { setBundle(null); del(DRAFT_KEY); } }}><Route /></button><div><small>{readOnly ? "SHARED ROADBOOK" : "YOUR ROADBOOK"}</small><strong>{bundle.request.destination}</strong></div><span className={`source-mode ${bundle.sourceMode}`}>{bundle.sourceMode === "live" ? "实时资料" : bundle.sourceMode === "mixed" ? "混合资料" : "演示降级"}</span></header>
+      <header className="planner-brand"><button aria-label="返回创建" onClick={() => { if (readOnly) { router.push("/"); return; } del(DRAFT_KEY); setBundle(null); if (initialBundle) router.push("/"); }}><Route /></button><div><small>{readOnly ? "SHARED ROADBOOK" : "YOUR ROADBOOK"}</small><strong>{bundle.request.destination}</strong></div>{!readOnly && <span className={`trip-save-state ${saveState}`}>{saveState === "saving" ? "保存中" : saveState === "error" ? "保存失败" : "已保存"}</span>}<Link className="trip-archive-link" href="/trips" aria-label="查看已保存行程"><BookOpenText /></Link><span className={`source-mode ${bundle.sourceMode}`}>{bundle.sourceMode === "live" ? "实时资料" : bundle.sourceMode === "mixed" ? "混合资料" : "演示降级"}</span></header>
       <section className="trip-summary"><div><span>{bundle.request.days}</span>天</div><div><span>{formatDistance(stats.distanceM)}</span>总里程</div><div><span>{formatHours(stats.driveS)}</span>自驾</div></section>
-      <div className="plan-tabs">{bundle.plans.map((item, index) => <button key={item.id} className={plan.id === item.id ? "active" : ""} onClick={() => setBundle({ ...bundle, selectedPlanId: item.id })}><small>方案 {String.fromCharCode(65 + index)}</small><strong>{item.name}</strong><span>{item.tagline}</span></button>)}</div>
+      <div className="plan-tabs">{bundle.plans.map((item, index) => <button key={item.id} className={plan.id === item.id ? "active" : ""} onClick={() => setBundle({ ...bundle, selectedPlanId: item.id, updatedAt: new Date().toISOString() })}><small>方案 {String.fromCharCode(65 + index)}</small><strong>{item.name}</strong><span>{item.tagline}</span></button>)}</div>
       <div className="day-list">{plan.days.map((day) => <button key={day.id} className={`day-card ${day.id === selectedDay?.id ? "active" : ""}`} onClick={() => selectDay(day)}>
         <span className={`day-number ${plan.accent}`}><small>DAY</small>{day.day}</span><div className="day-copy"><strong>{day.title}</strong><span>{day.activities.map((item) => item.place.name).join(" → ")}</span><small><BedDouble />{day.stay}</small></div><div className="day-metrics"><b>{formatDistance(day.totalDistanceM)}</b><span><CarFront />{formatHours(day.totalDriveS)}</span><em className={day.intensity}>{intensityLabels[day.intensity]}</em></div>
       </button>)}</div>

@@ -1,6 +1,6 @@
 # 去野 · 智能自驾旅行规划
 
-面向国内多日自驾的本地 MVP。用户输入目的地、天数、同行人员与偏好后，系统生成两套行程，通过每日卡片、地图路线和详情抽屉展示，并支持编辑、局部重算、只读分享、Excel/PDF 导出。
+面向国内多日自驾的本地 MVP。用户输入目的地、天数、同行人员与偏好后，系统生成两套行程，通过每日卡片、地图路线和详情抽屉展示，并支持自动保存、历史列表、继续编辑、局部重算、只读分享、Excel/PDF 导出。
 
 ## 本地运行
 
@@ -10,7 +10,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-打开 <http://127.0.0.1:3000>。运营后台为 <http://127.0.0.1:3000/admin>。
+打开 <http://127.0.0.1:3000>。已保存行程为 <http://127.0.0.1:3000/trips>，运营后台为 <http://127.0.0.1:3000/admin>。
 
 必须配置：
 
@@ -25,7 +25,7 @@ npm run dev
 - `SearchProvider`：一期 Tavily，未来可新增其他搜索实现。
 - `LlmProvider`：一期 GLM-5.2。
 - `MapProvider`：一期 Nominatim、OSM、OSRM。
-- Repository：一期 JSON 文件，浏览器草稿使用 IndexedDB。
+- Repository：生成成功的行程及后续修改保存为服务端 JSON 文件，浏览器同时使用 IndexedDB 保存最后草稿。
 - 当前新疆地图保留在 `/Users/felixcui/Documents/tmp/xinjiang-roadtrip-map/index.html`，只作为交互与回归参考，不与产品代码耦合。
 
 ## 验证

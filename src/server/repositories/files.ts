@@ -63,6 +63,16 @@ export class FileTripRepository {
     const parsed = TripBundleSchema.safeParse(data);
     return parsed.success ? parsed.data : null;
   }
+  async list() {
+    await mkdir(this.dir, { recursive: true });
+    const files = (await readdir(this.dir)).filter((file) => file.endsWith(".json"));
+    const bundles = await Promise.all(files.map((file) => readJson<TripBundle>(join(this.dir, file))));
+    return bundles
+      .map((bundle) => TripBundleSchema.safeParse(bundle))
+      .filter((result) => result.success)
+      .map((result) => result.data)
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
 }
 
 export class FileShareRepository {

@@ -141,6 +141,21 @@ export const TripBundleSchema = z.object({
 });
 export type TripBundle = z.infer<typeof TripBundleSchema>;
 
+export const TripSummarySchema = z.object({
+  id: z.string(),
+  destination: z.string(),
+  days: z.number().int().positive(),
+  planCount: z.number().int().positive(),
+  selectedPlanName: z.string(),
+  planNames: z.array(z.string()),
+  totalDistanceM: z.number().nonnegative(),
+  totalDriveS: z.number().nonnegative(),
+  sourceMode: z.enum(["live", "mixed", "demo"]),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type TripSummary = z.infer<typeof TripSummarySchema>;
+
 export const SearchResultSchema = z.object({
   title: z.string(),
   url: z.string().url(),
