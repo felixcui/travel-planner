@@ -1,0 +1,15 @@
+node_modules/
+.next/
+.env
+.env.local
+coverage/
+*.tsbuildinfo
+data/cache/*
+!data/cache/.gitkeep
+data/trips/*
+!data/trips/.gitkeep
+data/shares/*
+!data/shares/.gitkeep
+data/places/*.json
+data/sources/*.json
+*.log
