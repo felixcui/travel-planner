@@ -8,7 +8,7 @@ vi.mock("@/server/repositories/files", () => ({ FileTripRepository: class { save
 import { POST } from "./route";
 
 const generated: TripBundle = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   id: "trip_generated",
   request: {
     destination: "川西", days: 1, adults: 2, children: 0, childAges: [], seniors: 0,
@@ -22,6 +22,7 @@ const generated: TripBundle = {
   }],
   selectedPlanId: "plan_generated",
   sourceMode: "live",
+  revisions: [],
   createdAt: "2026-08-07T00:00:00.000Z",
   updatedAt: "2026-08-07T00:00:00.000Z",
 };

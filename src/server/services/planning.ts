@@ -81,6 +81,13 @@ async function resolvePlaces(names: string[], request: TripRequest) {
   return new Map(places.map((place) => [place.name, place]));
 }
 
+export async function resolvePlace(name: string, request: TripRequest) {
+  const places = await resolvePlaces([name], request);
+  const place = places.get(name);
+  if (!place) throw new Error(`没有找到“${name}”的可用地点资料`);
+  return place;
+}
+
 async function buildPlan(draft: PlanDraft["plans"][number], index: number, places: Map<string, Place>, request: TripRequest): Promise<Plan> {
   const map = new OsmMapProvider();
   const days = await mapLimit(draft.days.slice(0, request.days), 2, async (dayDraft, dayIndex) => {
@@ -136,21 +143,26 @@ export async function generateTrip(input: unknown): Promise<TripBundle> {
   const plans = await mapLimit(draft.plans.slice(0, 2), 2, (plan, index) => buildPlan(plan, index, places, request));
   const now = new Date().toISOString();
   return TripBundleSchema.parse({
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: id("trip"),
     request,
     plans,
     selectedPlanId: plans[0].id,
     sourceMode: llmLive && process.env.TAVILY_API_KEY ? "live" : llmLive || process.env.TAVILY_API_KEY ? "mixed" : "demo",
+    revisions: plans.map((plan) => ({
+      id: id("revision"), planId: plan.id, version: plan.version, source: "generated", summary: "首次生成方案", createdAt: now, snapshot: plan,
+    })),
     createdAt: now,
     updatedAt: now,
   });
 }
 
-export async function recalculatePlan(requestInput: unknown, planInput: Plan): Promise<Plan> {
+export async function recalculatePlan(requestInput: unknown, planInput: Plan, affectedDays?: number[]): Promise<Plan> {
   const request = TripRequestSchema.parse(requestInput);
   const map = new OsmMapProvider();
+  const affected = affectedDays ? new Set(affectedDays) : null;
   const days = await mapLimit(planInput.days, 2, async (day) => {
+    if (affected && !affected.has(day.day)) return day;
     const places = day.activities.filter((item) => item.type === "place").map((item) => item.place);
     const segments = await Promise.all(places.slice(0, -1).map((from, index) => map.calculateRoute(from, places[index + 1])));
     return applyDayRules({

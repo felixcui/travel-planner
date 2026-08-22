@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { TripBundle } from "@/lib/domain";
@@ -8,7 +8,7 @@ let testDir = "";
 
 function bundle(id: string, updatedAt: string): TripBundle {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id,
     request: {
       destination: "新疆伊犁", days: 1, adults: 2, children: 0, childAges: [], seniors: 0,
@@ -22,6 +22,7 @@ function bundle(id: string, updatedAt: string): TripBundle {
     }],
     selectedPlanId: `plan_${id}`,
     sourceMode: "live",
+    revisions: [],
     createdAt: updatedAt,
     updatedAt,
   };
@@ -47,5 +48,36 @@ describe("FileTripRepository", () => {
     expect((await repository.get("trip_old"))?.request.destination).toBe("新疆伊犁");
     expect((await repository.list()).map((trip) => trip.id)).toEqual(["trip_new", "trip_old"]);
     expect(await repository.get("missing")).toBeNull();
+  });
+
+  it("读取 v1 文件时迁移为 v2 并建立初始版本", async () => {
+    testDir = await mkdtemp(join(tmpdir(), "travel-planner-migration-"));
+    process.env.DATA_DIR = testDir;
+    const current = bundle("trip_legacy", "2026-08-01T08:00:00.000Z");
+    const legacy = { ...current, schemaVersion: 1, revisions: undefined };
+    await mkdir(join(testDir, "trips"), { recursive: true });
+    await writeFile(join(testDir, "trips", "trip_legacy.json"), JSON.stringify(legacy), "utf8");
+    vi.resetModules();
+    const { FileTripRepository } = await import("./files");
+    const migrated = await new FileTripRepository().get("trip_legacy");
+    expect(migrated?.schemaVersion).toBe(2);
+    expect(migrated?.revisions).toHaveLength(1);
+    expect(migrated?.revisions[0].source).toBe("generated");
+  });
+
+  it("分享快照只保留选中方案并移除会话和版本历史", async () => {
+    testDir = await mkdtemp(join(tmpdir(), "travel-planner-share-"));
+    process.env.DATA_DIR = testDir;
+    vi.resetModules();
+    const { FileShareRepository } = await import("./files");
+    const repository = new FileShareRepository();
+    const value = bundle("trip_private", "2026-08-01T08:00:00.000Z");
+    value.agentSessionId = "session_private";
+    value.revisions = [{ id: "rev_1", planId: value.plans[0].id, version: 1, source: "generated", summary: "初始", createdAt: value.createdAt, snapshot: value.plans[0] }];
+    await repository.save("secret-token", value);
+    const shared = await repository.get("secret-token");
+    expect(shared?.plans).toHaveLength(1);
+    expect(shared?.agentSessionId).toBeUndefined();
+    expect(shared?.revisions).toEqual([]);
   });
 });

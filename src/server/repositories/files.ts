@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import type { Place, TripBundle } from "@/lib/domain";
-import { PlaceSchema, TripBundleSchema } from "@/lib/domain";
+import type { AgentSession, Place, TripBundle } from "@/lib/domain";
+import { AgentSessionSchema, migrateTripBundle, PlaceSchema, TripBundleSchema } from "@/lib/domain";
 
 const root = resolve(/* turbopackIgnore: true */ process.cwd(), process.env.DATA_DIR ?? "./data");
 const stableHash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -59,19 +59,34 @@ export class FileTripRepository {
     return validated;
   }
   async get(id: string) {
-    const data = await readJson<TripBundle>(join(this.dir, `${id}.json`));
-    const parsed = TripBundleSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
+    const data = await readJson<unknown>(join(this.dir, `${id}.json`));
+    if (!data) return null;
+    try { return migrateTripBundle(data); } catch { return null; }
   }
   async list() {
     await mkdir(this.dir, { recursive: true });
     const files = (await readdir(this.dir)).filter((file) => file.endsWith(".json"));
-    const bundles = await Promise.all(files.map((file) => readJson<TripBundle>(join(this.dir, file))));
+    const bundles = await Promise.all(files.map((file) => readJson<unknown>(join(this.dir, file))));
     return bundles
-      .map((bundle) => TripBundleSchema.safeParse(bundle))
-      .filter((result) => result.success)
-      .map((result) => result.data)
+      .map((bundle) => { try { return migrateTripBundle(bundle); } catch { return null; } })
+      .filter((bundle): bundle is TripBundle => Boolean(bundle))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+}
+
+export class FileAgentSessionRepository {
+  private dir = join(root, "agent-sessions");
+
+  async save(session: AgentSession) {
+    const validated = AgentSessionSchema.parse(session);
+    await atomicWrite(join(this.dir, `${validated.id}.json`), validated);
+    return validated;
+  }
+
+  async get(id: string) {
+    const data = await readJson<unknown>(join(this.dir, `${id}.json`));
+    const parsed = AgentSessionSchema.safeParse(data);
+    return parsed.success ? parsed.data : null;
   }
 }
 
@@ -79,12 +94,21 @@ export class FileShareRepository {
   private dir = join(root, "shares");
   async save(token: string, bundle: TripBundle) {
     const hash = stableHash(token);
-    await atomicWrite(join(this.dir, `${hash}.json`), { schemaVersion: 1, createdAt: new Date().toISOString(), bundle: TripBundleSchema.parse(bundle) });
+    const validated = TripBundleSchema.parse(bundle);
+    const selected = validated.plans.find((plan) => plan.id === validated.selectedPlanId) ?? validated.plans[0];
+    const shared: TripBundle = {
+      ...validated,
+      plans: [selected],
+      selectedPlanId: selected.id,
+      agentSessionId: undefined,
+      revisions: [],
+    };
+    await atomicWrite(join(this.dir, `${hash}.json`), { schemaVersion: 2, createdAt: new Date().toISOString(), bundle: shared });
   }
   async get(token: string) {
-    const data = await readJson<{ bundle: TripBundle }>(join(this.dir, `${stableHash(token)}.json`));
-    const parsed = TripBundleSchema.safeParse(data?.bundle);
-    return parsed.success ? parsed.data : null;
+    const data = await readJson<{ bundle?: unknown }>(join(this.dir, `${stableHash(token)}.json`));
+    if (!data?.bundle) return null;
+    try { return migrateTripBundle(data.bundle); } catch { return null; }
   }
 }
 

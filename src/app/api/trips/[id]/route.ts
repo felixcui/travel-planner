@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { TripBundleSchema } from "@/lib/domain";
+import { migrateTripBundle } from "@/lib/domain";
 import { FileTripRepository } from "@/server/repositories/files";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +18,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 export async function PUT(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const bundle = TripBundleSchema.parse(await request.json());
+    const bundle = migrateTripBundle(await request.json());
     if (bundle.id !== id) return NextResponse.json({ error: "行程标识不匹配" }, { status: 400 });
     return NextResponse.json(await new FileTripRepository().save(bundle));
   } catch (error) {

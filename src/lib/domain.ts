@@ -129,7 +129,19 @@ export const PlanSchema = z.object({
 });
 export type Plan = z.infer<typeof PlanSchema>;
 
-export const TripBundleSchema = z.object({
+export const PlanRevisionSchema = z.object({
+  id: z.string(),
+  planId: z.string(),
+  version: z.number().int().positive(),
+  parentVersion: z.number().int().positive().optional(),
+  source: z.enum(["generated", "agent", "manual", "restored"]),
+  summary: z.string(),
+  createdAt: z.string(),
+  snapshot: PlanSchema,
+});
+export type PlanRevision = z.infer<typeof PlanRevisionSchema>;
+
+export const LegacyTripBundleSchema = z.object({
   schemaVersion: z.literal(1),
   id: z.string(),
   request: TripRequestSchema,
@@ -139,7 +151,106 @@ export const TripBundleSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
 });
+
+export const TripBundleSchema = z.object({
+  schemaVersion: z.literal(2),
+  id: z.string(),
+  request: TripRequestSchema,
+  plans: z.array(PlanSchema).min(1),
+  selectedPlanId: z.string(),
+  sourceMode: z.enum(["live", "mixed", "demo"]),
+  agentSessionId: z.string().optional(),
+  revisions: z.array(PlanRevisionSchema).default([]),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
 export type TripBundle = z.infer<typeof TripBundleSchema>;
+
+export function migrateTripBundle(input: unknown): TripBundle {
+  const current = TripBundleSchema.safeParse(input);
+  if (current.success) return current.data;
+  const legacy = LegacyTripBundleSchema.parse(input);
+  return TripBundleSchema.parse({
+    ...legacy,
+    schemaVersion: 2,
+    revisions: legacy.plans.map((plan) => ({
+      id: `revision_${plan.id}_${plan.version}`,
+      planId: plan.id,
+      version: plan.version,
+      source: "generated",
+      summary: "从旧版行程迁移",
+      createdAt: plan.createdAt,
+      snapshot: plan,
+    })),
+  });
+}
+
+const TripBriefFields = ["destination", "days", "adults", "children", "childAges", "seniors", "pace", "interests", "mustGo", "avoid", "startPoint", "endPoint", "earliestDeparture", "latestArrival", "maxDriveHours", "month", "notes"] as const;
+
+export const TripBriefDraftSchema = TripRequestSchema.partial().extend({
+  confirmedFields: z.array(z.enum(TripBriefFields)).default([]),
+});
+export type TripBriefDraft = z.infer<typeof TripBriefDraftSchema>;
+
+export const AgentMessageSchema = z.object({
+  id: z.string(),
+  role: z.enum(["user", "assistant"]),
+  kind: z.enum(["text", "question", "brief", "comparison", "change_preview", "status", "error"]).default("text"),
+  content: z.string(),
+  quickReplies: z.array(z.string()).default([]),
+  createdAt: z.string(),
+});
+export type AgentMessage = z.infer<typeof AgentMessageSchema>;
+
+export const PlanChangeOperationSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("add_place"), day: z.number().int().positive(), placeName: z.string() }),
+  z.object({ type: z.literal("remove_place"), day: z.number().int().positive(), placeName: z.string() }),
+  z.object({ type: z.literal("replace_place"), day: z.number().int().positive(), placeName: z.string(), replacement: z.string() }),
+  z.object({ type: z.literal("move_place"), day: z.number().int().positive(), placeName: z.string(), direction: z.enum(["earlier", "later"]) }),
+  z.object({ type: z.literal("update_stay"), day: z.number().int().positive(), stay: z.string() }),
+  z.object({ type: z.literal("lighten_day"), day: z.number().int().positive() }),
+]);
+export type PlanChangeOperation = z.infer<typeof PlanChangeOperationSchema>;
+
+export const PlanMetricsSchema = z.object({
+  distanceM: z.number().nonnegative(),
+  driveS: z.number().nonnegative(),
+  tiringDays: z.number().int().nonnegative(),
+  placeCount: z.number().int().nonnegative(),
+});
+
+export const PlanChangeSetSchema = z.object({
+  id: z.string(),
+  planId: z.string(),
+  baseVersion: z.number().int().positive(),
+  summary: z.string(),
+  affectedDays: z.array(z.number().int().positive()),
+  operations: z.array(PlanChangeOperationSchema).min(1),
+  before: PlanMetricsSchema,
+  after: PlanMetricsSchema,
+  proposedPlan: PlanSchema,
+  createdAt: z.string(),
+});
+export type PlanChangeSet = z.infer<typeof PlanChangeSetSchema>;
+
+export const AgentSessionSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: z.string(),
+  stage: z.enum(["collecting", "ready", "generating", "comparing", "editing"]),
+  brief: TripBriefDraftSchema,
+  messages: z.array(AgentMessageSchema),
+  tripId: z.string().optional(),
+  pendingChange: PlanChangeSetSchema.optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type AgentSession = z.infer<typeof AgentSessionSchema>;
+
+export type AgentEvent =
+  | { type: "ack" | "progress"; message: string }
+  | { type: "session"; session: AgentSession }
+  | { type: "trip"; trip: TripBundle }
+  | { type: "error"; message: string };
 
 export const TripSummarySchema = z.object({
   id: z.string(),

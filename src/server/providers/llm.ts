@@ -1,5 +1,6 @@
 import { z } from "zod";
-import type { PlaceKnowledge, SearchResult, TripRequest } from "@/lib/domain";
+import { PlanChangeOperationSchema, TripBriefDraftSchema } from "@/lib/domain";
+import type { PlaceKnowledge, Plan, PlanChangeOperation, SearchResult, TripBriefDraft, TripRequest } from "@/lib/domain";
 
 const PlanDraftSchema = z.object({
   plans: z.array(z.object({
@@ -30,6 +31,8 @@ const KnowledgeDraftSchema = z.object({
 export interface LlmProvider {
   generatePlans(request: TripRequest): Promise<PlanDraft>;
   structureKnowledge(placeName: string, sources: SearchResult[]): Promise<Omit<PlaceKnowledge, "sources" | "updatedAt" | "expiresAt" | "lockedFields">>;
+  extractTripBrief(message: string, current: TripBriefDraft): Promise<TripBriefDraft>;
+  interpretPlanChange(message: string, plan: Plan): Promise<PlanChangeOperation[]>;
 }
 
 export class GlmChatProvider implements LlmProvider {
@@ -76,6 +79,20 @@ export class GlmChatProvider implements LlmProvider {
       `为以下需求生成恰好两套不同的自驾方案，每套恰好 ${request.days} 天。第一套均衡经典，第二套突出兴趣且减少折返。\n需求：${JSON.stringify(request)}\n必去：${required}\n每一天 places 只放真实、可在地图检索的地点名称，1-3个；stay 是当晚住宿区域。输出：{"plans":[{"name":"","tagline":"","days":[{"title":"","places":[""],"stay":"","stayReason":""}]}]}`,
       PlanDraftSchema,
     );
+  }
+
+  extractTripBrief(message: string, current: TripBriefDraft) {
+    return this.complete(
+      `从用户消息中提取中国多日自驾需求，只返回本次明确提到或修正的字段。不要猜目的地、天数或儿童年龄。confirmedFields 必须只列出本次明确出现的字段名。\n已有需求：${JSON.stringify(current)}\n用户消息：${message}\n输出字段可包括 destination、days、adults、children、childAges、seniors、pace(relaxed|balanced|compact)、interests、mustGo、avoid、startPoint、endPoint、earliestDeparture、latestArrival、maxDriveHours、month、notes、confirmedFields。`,
+      TripBriefDraftSchema,
+    );
+  }
+
+  interpretPlanChange(message: string, plan: Plan) {
+    return this.complete(
+      `把用户对自驾行程的修改要求转换为最少量结构化操作。只允许 add_place、remove_place、replace_place、move_place、update_stay、lighten_day；day 从 1 开始。若不是明确修改请求返回空数组。不得返回行程中不存在的被删除/移动地点。\n当前方案：${JSON.stringify(plan)}\n用户消息：${message}\n输出：{"operations":[]}`,
+      z.object({ operations: z.array(PlanChangeOperationSchema) }),
+    ).then((result) => result.operations);
   }
 
   async structureKnowledge(placeName: string, sources: SearchResult[]) {

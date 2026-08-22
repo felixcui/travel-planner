@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo } from "react";
 import L from "leaflet";
-import { MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap } from "react-leaflet";
+import { MapContainer, Marker, Polyline, Popup, TileLayer, Tooltip, useMap, ZoomControl } from "react-leaflet";
 import type { DayPlan, Plan, Place } from "@/lib/domain";
 
 function FitRoute({ days }: { days: DayPlan[] }) {
@@ -29,6 +29,7 @@ export default function TripMap({ plan, selectedDayId, onSelectPlace }: { plan: 
   return (
     <MapContainer center={[center.lat, center.lng]} zoom={6} className="trip-map" zoomControl={false}>
       <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+      <ZoomControl position="bottomleft" />
       <FitRoute days={days} />
       {days.map((day) => (
         <Polyline key={`line-${day.id}`} positions={day.segments.flatMap((segment) => segment.geometry.map((point) => [point.lat, point.lng] as [number, number]))} pathOptions={{ color: plan.accent === "vermillion" ? "#e5573f" : "#187865", weight: 6, opacity: 0.82 }} />
