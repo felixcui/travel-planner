@@ -12,4 +12,5 @@ data/shares/*
 !data/shares/.gitkeep
 data/places/*.json
 data/sources/*.json
+data/agent-sessions/
 *.log
