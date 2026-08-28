@@ -32,6 +32,18 @@ const defaults: TripBriefDraft = {
   confirmedFields: [],
 };
 
+// 生成方案前需要多轮补充的信息，每轮一问；命中或用户回答“没有”等即可进入下一题。
+const INTERVIEW_STEPS = [
+  { id: "mustGo", question: "这次有没有非去不可的景点或区域？比如某个湖、古城、景区。没有的话回复“没有必去”即可。", quickReplies: ["没有必去", "都可以"], satisfied: (brief: TripBriefDraft) => (brief.mustGo?.length ?? 0) > 0 },
+  { id: "interests", question: "更偏向哪种玩法？自然风光、人文历史、美食，还是轻徒步？", quickReplies: ["自然风光", "人文历史", "美食", "轻徒步"], satisfied: (brief: TripBriefDraft) => (brief.interests?.length ?? 0) > 0 },
+  { id: "avoid", question: "有没有完全不想去的地方或区域？没有就用“没有”跳过。", quickReplies: ["没有", "都行"], satisfied: (brief: TripBriefDraft) => (brief.avoid?.length ?? 0) > 0 },
+];
+const INTERVIEW_IDS = INTERVIEW_STEPS.map((step) => step.id);
+
+function isForceConfirmText(text: string) {
+  return /开始规划|就这样|可以了|差不多了|都确定了|其他都随意|不用再问|开始吧|就当这样|足够了/.test(text);
+}
+
 function message(role: AgentMessage["role"], content: string, kind: AgentMessage["kind"] = "text", quickReplies: string[] = []): AgentMessage {
   return { id: id("message"), role, kind, content, quickReplies, createdAt: new Date().toISOString() };
 }
@@ -188,6 +200,7 @@ export class TravelAgentService {
       id: id("session"),
       stage: trip ? "editing" : "collecting",
       brief: trip ? { ...trip.request, confirmedFields: ["destination", "days"] } : defaults,
+      interviewQueue: trip ? [] : INTERVIEW_IDS,
       messages: [message("assistant", trip ? `已恢复你的${trip.request.destination}行程。可以继续问我路线原因，或者直接告诉我想改哪一天。` : "你好，我是去野旅行 Agent。告诉我想去哪里、玩几天、和谁同行，我会边聊边把约束整理成可执行的自驾方案。", "text", trip ? [] : ["去川西玩 5 天，2 位成人，节奏轻松", "带孩子去新疆伊犁自驾 7 天", "想做一条云南自然风光路线"])],
       tripId: trip?.id,
       createdAt: now,
@@ -280,8 +293,25 @@ export class TravelAgentService {
         emit({ type: "progress", message: "正在整理旅行条件" });
         const brief = await this.extractBrief(input.message, session.brief);
         const missing = missingFields(brief);
-        const assistant = missing.length ? message("assistant", questionFor(missing), "question") : message("assistant", briefSummary(brief), "brief", ["开始规划"]);
-        session = { ...session, brief, stage: missing.length ? "collecting" : "ready", messages: [...session.messages, assistant], updatedAt: new Date().toISOString() };
+        const now = new Date().toISOString();
+        if (missing.length) {
+          const assistant = message("assistant", questionFor(missing), "question");
+          session = { ...session, brief, interviewQueue: session.interviewQueue, stage: "collecting", messages: [...session.messages, assistant], updatedAt: now };
+        } else if (session.stage === "collecting" && !isForceConfirmText(input.message)) {
+          const base = session.interviewQueue;
+          const remaining = base.filter((id) => { const step = INTERVIEW_STEPS.find((item) => item.id === id); return step && !step.satisfied(brief); });
+          if (remaining.length) {
+            const step = INTERVIEW_STEPS.find((item) => item.id === remaining[0])!;
+            const assistant = message("assistant", step.question, "question", step.quickReplies);
+            session = { ...session, brief, interviewQueue: remaining.slice(1), stage: "collecting", messages: [...session.messages, assistant], updatedAt: now };
+          } else {
+            const assistant = message("assistant", briefSummary(brief), "brief", ["开始规划"]);
+            session = { ...session, brief, interviewQueue: [], stage: "ready", messages: [...session.messages, assistant], updatedAt: now };
+          }
+        } else {
+          const assistant = message("assistant", briefSummary(brief), "brief", ["开始规划"]);
+          session = { ...session, brief, interviewQueue: [], stage: "ready", messages: [...session.messages, assistant], updatedAt: now };
+        }
       } else {
         const bundle = session.tripId ? await this.trips.get(session.tripId) : null;
         if (!bundle) throw new Error("没有找到当前行程，请重新生成");

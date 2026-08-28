@@ -22,16 +22,29 @@ describe("TravelAgentService", () => {
     expect(brief.mustGo).toBeUndefined();
   });
 
-  it("儿童年龄缺失时继续追问，补充后进入 ready", async () => {
+  it("儿童年龄缺失时继续追问；补充需求后进入多轮访谈，访谈完才 ready", async () => {
     const sessions = new MemorySessions();
     const service = new TravelAgentService(sessions, new MemoryTrips());
     let session = await service.createSession();
     ({ session } = await service.handleTurn(session.id, { type: "message", message: "去川西玩5天，2大1小，节奏轻松" }));
     expect(session.stage).toBe("collecting");
     expect(session.messages.at(-1)?.content).toContain("孩子");
-    ({ session } = await service.handleTurn(session.id, { type: "message", message: "孩子8岁" }));
-    expect(session.stage).toBe("ready");
+    ({ session } = await service.handleTurn(session.id, { type: "message", message: "孩子8岁，必去四姑娘山，喜欢自然风光" }));
+    expect(session.stage).toBe("collecting");
+    expect(session.messages.at(-1)?.content).toContain("不想去");
     expect(session.brief.childAges).toEqual([8]);
+    expect(session.brief.mustGo).toContain("四姑娘山");
+    ({ session } = await service.handleTurn(session.id, { type: "message", message: "没有" }));
+    expect(session.stage).toBe("ready");
+  });
+
+  it("开始规划前会先追问必去景点，而不是直接 ready", async () => {
+    const sessions = new MemorySessions();
+    const service = new TravelAgentService(sessions, new MemoryTrips());
+    let session = await service.createSession();
+    ({ session } = await service.handleTurn(session.id, { type: "message", message: "去新疆玩10天，北疆大环线，2位成人" }));
+    expect(session.stage).toBe("collecting");
+    expect(session.messages.at(-1)?.content).toContain("必去");
   });
 
   it("把常见修改要求限制为结构化操作", () => {
@@ -52,7 +65,7 @@ describe("TravelAgentService", () => {
       plans: [plan], selectedPlanId: plan.id, sourceMode: "demo", revisions: [], createdAt: plan.createdAt, updatedAt: plan.createdAt,
     };
     const session: AgentSession = {
-      schemaVersion: 1, id: "session_1", stage: "editing", brief: { destination: "川西", days: 1, confirmedFields: ["destination", "days"] }, messages: [], tripId: trip.id,
+      schemaVersion: 1, id: "session_1", stage: "editing", brief: { destination: "川西", days: 1, confirmedFields: ["destination", "days"] }, interviewQueue: [], messages: [], tripId: trip.id,
       pendingChange: { id: "change_1", planId: plan.id, baseVersion: 1, summary: "精简", affectedDays: [1], operations: [{ type: "lighten_day", day: 1 }], before: { distanceM: 0, driveS: 0, tiringDays: 0, placeCount: 0 }, after: { distanceM: 0, driveS: 0, tiringDays: 0, placeCount: 0 }, proposedPlan: { ...plan, version: 2 }, createdAt: plan.createdAt },
       createdAt: plan.createdAt, updatedAt: plan.createdAt,
     };

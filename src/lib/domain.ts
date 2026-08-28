@@ -238,6 +238,7 @@ export const AgentSessionSchema = z.object({
   id: z.string(),
   stage: z.enum(["collecting", "ready", "generating", "comparing", "editing"]),
   brief: TripBriefDraftSchema,
+  interviewQueue: z.array(z.string()).default([]),
   messages: z.array(AgentMessageSchema),
   tripId: z.string().optional(),
   pendingChange: PlanChangeSetSchema.optional(),
