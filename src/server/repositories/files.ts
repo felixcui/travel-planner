@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { AgentSession, Place, TripBundle } from "@/lib/domain";
 import { AgentSessionSchema, migrateTripBundle, PlaceSchema, TripBundleSchema } from "@/lib/domain";
+import { getLockPath, withLock } from "./file-lock";
 
 const root = resolve(/* turbopackIgnore: true */ process.cwd(), process.env.DATA_DIR ?? "./data");
 const stableHash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -12,6 +13,13 @@ async function atomicWrite(path: string, value: unknown) {
   const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
   await writeFile(temp, JSON.stringify(value, null, 2), "utf8");
   await rename(temp, path);
+}
+
+async function atomicWriteWithLock(path: string, value: unknown) {
+  const lockPath = getLockPath(dirname(path), basename(path));
+  await withLock(lockPath, async () => {
+    await atomicWrite(path, value);
+  });
 }
 
 async function readJson<T>(path: string): Promise<T | null> {
@@ -46,7 +54,7 @@ export class FilePlaceRepository {
 
   async save(place: Place) {
     const validated = PlaceSchema.parse(place);
-    await atomicWrite(join(this.dir, `${validated.id}.json`), validated);
+    await atomicWriteWithLock(join(this.dir, `${validated.id}.json`), validated);
     return validated;
   }
 }
@@ -55,7 +63,7 @@ export class FileTripRepository {
   private dir = join(root, "trips");
   async save(bundle: TripBundle) {
     const validated = TripBundleSchema.parse(bundle);
-    await atomicWrite(join(this.dir, `${validated.id}.json`), validated);
+    await atomicWriteWithLock(join(this.dir, `${validated.id}.json`), validated);
     return validated;
   }
   async get(id: string) {
@@ -79,7 +87,7 @@ export class FileAgentSessionRepository {
 
   async save(session: AgentSession) {
     const validated = AgentSessionSchema.parse(session);
-    await atomicWrite(join(this.dir, `${validated.id}.json`), validated);
+    await atomicWriteWithLock(join(this.dir, `${validated.id}.json`), validated);
     return validated;
   }
 
@@ -103,7 +111,7 @@ export class FileShareRepository {
       agentSessionId: undefined,
       revisions: [],
     };
-    await atomicWrite(join(this.dir, `${hash}.json`), { schemaVersion: 2, createdAt: new Date().toISOString(), bundle: shared });
+    await atomicWriteWithLock(join(this.dir, `${hash}.json`), { schemaVersion: 2, createdAt: new Date().toISOString(), bundle: shared });
   }
   async get(token: string) {
     const data = await readJson<{ bundle?: unknown }>(join(this.dir, `${stableHash(token)}.json`));

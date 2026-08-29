@@ -172,8 +172,8 @@ function assistantTextFrom(messages: PiAgentMessage[]): string {
   for (const item of messages) {
     if (item.role !== "assistant") continue;
     const joined = item.content
-      .filter((part): part is { type: "text"; text: string } => part.type === "text")
-      .map((part) => part.text.trim())
+      .filter((part: unknown): part is { type: "text"; text: string } => typeof part === "object" && part !== null && "type" in part && part.type === "text")
+      .map((part: { type: "text"; text: string }) => part.text.trim())
       .filter(Boolean)
       .join("\n");
     if (joined) text = joined;
@@ -195,7 +195,7 @@ export function createPiConversationRunner(): PiConversationRunner {
         label: "更新旅行需求",
         description: "把用户消息中「本次明确提到或修正」的旅行需求字段写入结构化档案。只传本次明确出现的字段，confirmedFields 由系统自动记录。",
         parameters: BriefPatchSchema,
-        async execute(_toolCallId, params: BriefPatch) {
+        async execute(_toolCallId: string, params: BriefPatch) {
           const keys = Object.keys(params);
           effects.brief = mergeBrief(effects.brief, {
             ...(params as unknown as TripBriefDraft),
@@ -214,7 +214,7 @@ export function createPiConversationRunner(): PiConversationRunner {
         label: "向用户追问",
         description: "当需求档案缺少关键信息（目的地、天数、儿童年龄或影响规划的偏好）时，向用户提出一个具体问题。问完即停止本轮，等待用户回复。",
         parameters: AskQuestionSchema,
-        async execute(_toolCallId, params: AskQuestion) {
+        async execute(_toolCallId: string, params: AskQuestion) {
           effects.question = params;
           return {
             content: [{ type: "text", text: `已向用户提问：${params.question}` }],
@@ -264,7 +264,7 @@ export function createPiConversationRunner(): PiConversationRunner {
         label: "请求行程修改",
         description: "把用户的修改要求转换为最少量结构化操作并请求计算预览。day 从 1 开始；被操作的 placeName 必须是行程中已存在的景点名。",
         parameters: RequestChangeSchema,
-        async execute(_toolCallId, params: RequestChange) {
+        async execute(_toolCallId: string, params: RequestChange) {
           if (!bundle) throw new Error("当前没有行程，无法修改。");
           const operations = PlanChangeOperationSchema.array().parse(params.operations) as PlanChangeOperation[];
           deps.onProgress("正在计算调整后的路线与强度");
@@ -292,11 +292,11 @@ export function createPiConversationRunner(): PiConversationRunner {
             apiKey: llm.apiKey,
             temperature: 0.3,
             maxTokens: 4096,
-            convertToLlm: (messages) => messages,
+            convertToLlm: (messages: unknown) => messages as PiAgentMessage[],
             shouldStopAfterTurn: () => ++turns >= 8,
           },
-          (event) => {
-            if (event.type === "tool_execution_start") {
+          (event: { type: string; toolName?: string }) => {
+            if (event.type === "tool_execution_start" && event.toolName) {
               const progress = TOOL_PROGRESS[event.toolName];
               if (progress) deps.onProgress(progress);
             }
