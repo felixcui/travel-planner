@@ -195,7 +195,7 @@ export type TripBriefDraft = z.infer<typeof TripBriefDraftSchema>;
 export const AgentMessageSchema = z.object({
   id: z.string(),
   role: z.enum(["user", "assistant"]),
-  kind: z.enum(["text", "question", "brief", "comparison", "change_preview", "status", "error"]).default("text"),
+  kind: z.enum(["text", "question", "brief", "comparison", "change_preview", "status", "system", "error"]).default("text"),
   content: z.string(),
   quickReplies: z.array(z.string()).default([]),
   createdAt: z.string(),

@@ -35,6 +35,54 @@ export interface LlmProvider {
   interpretPlanChange(message: string, plan: Plan): Promise<PlanChangeOperation[]>;
 }
 
+/** 规划期 LLM 顾问：把原启发式规则（时长分配/强度评级/砍景点）交给大模型，物理校验留在代码。 */
+export interface DayDurationInput {
+  day: number;
+  places: Array<{ name: string; category: string; suggestedDurationMin: number; summary: string; suitableFor: string[] }>;
+}
+
+export interface DayFactsInput {
+  day: number;
+  placeNames: string[];
+  driveHours: number;
+  placeCount: number;
+  finishTime: string;
+}
+
+export interface RemovalCandidateInput {
+  name: string;
+  category: string;
+  isMustGo: boolean;
+  suggestedDurationMin: number;
+  position: number;
+}
+
+export interface PlanningAdvisor {
+  allocateDurations(days: DayDurationInput[], request: TripRequest): Promise<Array<{ day: number; durations: Record<string, number> }>>;
+  evaluateDays(days: DayFactsInput[], request: TripRequest): Promise<Array<{ day: number; intensity: "relaxed" | "balanced" | "tiring" | "not_recommended"; reason: string }>>;
+  chooseRemoval(input: { day: number; driveHours: number; maxDriveHours: number; family: boolean; candidates: RemovalCandidateInput[] }): Promise<{ place: string; reason: string }>;
+}
+
+const DurationAllocationSchema = z.object({
+  days: z.array(z.object({
+    day: z.number().int().min(1),
+    durations: z.record(z.string(), z.number().int().min(30).max(600)),
+  })),
+});
+
+const DayEvaluationSchema = z.object({
+  days: z.array(z.object({
+    day: z.number().int().min(1),
+    intensity: z.enum(["relaxed", "balanced", "tiring", "not_recommended"]),
+    reason: z.string().min(1).max(200),
+  })),
+});
+
+const RemovalChoiceSchema = z.object({
+  place: z.string().min(1),
+  reason: z.string().min(1).max(200),
+});
+
 export class GlmChatProvider implements LlmProvider {
   constructor(
     private readonly apiKey = process.env.GLM_API_KEY ?? "",
@@ -103,8 +151,33 @@ export class GlmChatProvider implements LlmProvider {
     );
     return { ...result, status: result.needsReview ? "needs_review" as const : "auto" as const };
   }
+
+  allocateDurations(days: DayDurationInput[], request: TripRequest) {
+    return this.complete(
+      `为自驾行程的每一天分配各景点游玩时长（分钟）。参考每个景点的类型、简介、建议时长和适合人群，结合出行人结构（成人 ${request.adults}、儿童 ${request.children} 位${request.childAges.length ? `（${request.childAges.join("、")} 岁）` : ""}、老人 ${request.seniors} 位）与节奏偏好（${request.pace}）。有儿童或老人时倾向缩短单个景点时长、增加休息；同一天多个景点时要考虑总时长可完成。只能在 30-600 分钟之间取整数值。\n行程：${JSON.stringify(days)}\n输出：{"days":[{"day":1,"durations":{"景点名":120}}]}，durations 必须覆盖该天每一个景点名，不得新增或遗漏。`,
+      DurationAllocationSchema,
+    ).then((result) => result.days);
+  }
+
+  evaluateDays(days: DayFactsInput[], request: TripRequest) {
+    return this.complete(
+      `基于以下真实物理数据（车程、景点数、结束时间均已由代码计算，不可更改）评估每一天的强度等级。评估要考虑出行人结构（成人 ${request.adults}、儿童 ${request.children} 位${request.childAges.length ? `（${request.childAges.join("、")} 岁）` : ""}、老人 ${request.seniors} 位）和每日驾驶上限 ${request.maxDriveHours} 小时：带幼童或老人时同样驾驶时长应评更高强度。判断标准是“这天的节奏对这家人是否舒适”。\n注意：驾驶超过 ${request.maxDriveHours} 小时上限或晚于 ${request.latestArrival} 结束的日子已由代码判定为 not_recommended，你只需要对没有超限的日子给出 relaxed/balanced/tiring 的软判断（若你判断确实过于劳累也可给 not_recommended 并说明理由）。\n每天数据：${JSON.stringify(days)}\n输出：{"days":[{"day":1,"intensity":"balanced","reason":"简短理由"}]}，必须覆盖每一个给出的天。`,
+      DayEvaluationSchema,
+    ).then((result) => result.days);
+  }
+
+  chooseRemoval(input: { day: number; driveHours: number; maxDriveHours: number; family: boolean; candidates: RemovalCandidateInput[] }) {
+    return this.complete(
+      `这天自驾行程超出限制（驾驶 ${input.driveHours.toFixed(1)} 小时 / 上限 ${input.maxDriveHours} 小时${input.family ? "，且同行有儿童或老人" : ""}），必须从以下候选景点中移除一个来减负。综合可玩性、类别重复度（同类景点优先移除）、位置（行程中段通常更耗时）、是否必去（必去不可选）来决定移除哪个，并给出面向用户的理由。\n候选：${JSON.stringify(input.candidates)}\n输出：{"place":"要移除的景点名","reason":"给用户看的简短理由"}，place 必须是候选之一且不是必去景点。`,
+      RemovalChoiceSchema,
+    );
+  }
 }
 
 export function createLlmProvider(): LlmProvider | null {
+  return process.env.GLM_API_KEY ? new GlmChatProvider() : null;
+}
+
+export function createPlanningAdvisor(): PlanningAdvisor | null {
   return process.env.GLM_API_KEY ? new GlmChatProvider() : null;
 }

@@ -4,6 +4,9 @@ import { AgentSessionSchema, PlanChangeOperationSchema, TripRequestSchema } from
 import { id, summarizePlan } from "@/lib/utils";
 import { FileAgentSessionRepository, FileTripRepository } from "../repositories/files";
 import { createLlmProvider } from "../providers/llm";
+import { briefDefaults, mergeBrief, missingFields, toRequest } from "./brief-utils";
+import { createPiConversationRunner } from "./pi-conversation";
+import type { PiConversationRunner } from "./pi-conversation";
 import { generateTrip, recalculatePlan, resolvePlace } from "./planning";
 
 export const AgentTurnInputSchema = z.discriminatedUnion("type", [
@@ -15,22 +18,6 @@ export const AgentTurnInputSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("restore_revision"), revisionId: z.string() }),
 ]);
 export type AgentTurnInput = z.infer<typeof AgentTurnInputSchema>;
-
-const defaults: TripBriefDraft = {
-  adults: 2,
-  children: 0,
-  childAges: [],
-  seniors: 0,
-  pace: "balanced",
-  interests: [],
-  mustGo: [],
-  avoid: [],
-  earliestDeparture: "09:00",
-  latestArrival: "19:30",
-  maxDriveHours: 5,
-  notes: "",
-  confirmedFields: [],
-};
 
 // 生成方案前需要多轮补充的信息，每轮一问；命中或用户回答“没有”等即可进入下一题。
 const INTERVIEW_STEPS = [
@@ -93,34 +80,11 @@ export function extractTripBriefFallback(text: string): TripBriefDraft {
   return patch;
 }
 
-function mergeBrief(current: TripBriefDraft, ...patches: TripBriefDraft[]) {
-  const merged: TripBriefDraft = { ...current, confirmedFields: [...current.confirmedFields] };
-  for (const patch of patches) {
-    for (const [key, value] of Object.entries(patch)) {
-      if (key !== "confirmedFields" && value !== undefined) Object.assign(merged, { [key]: value });
-    }
-    merged.confirmedFields = [...new Set([...merged.confirmedFields, ...patch.confirmedFields])];
-  }
-  return merged;
-}
-
-function missingFields(brief: TripBriefDraft) {
-  const missing: string[] = [];
-  if (!brief.destination || brief.destination.length < 2) missing.push("destination");
-  if (!brief.days) missing.push("days");
-  if ((brief.children ?? 0) > 0 && (brief.childAges?.length ?? 0) === 0) missing.push("childAges");
-  return missing;
-}
-
 function questionFor(missing: string[]) {
   if (missing.includes("destination") && missing.includes("days")) return "想去哪里、准备玩几天？也可以顺手告诉我同行人员和偏好。";
   if (missing.includes("destination")) return "这次自驾想去哪个城市、省份或连续区域？";
   if (missing.includes("days")) return "你准备在目的地完整游玩几天？";
   return "孩子大约几岁？我会据此调整连续驾驶和休息时间。";
-}
-
-function toRequest(brief: TripBriefDraft): TripRequest {
-  return TripRequestSchema.parse({ ...defaults, ...brief, confirmedFields: undefined });
 }
 
 function briefSummary(brief: TripBriefDraft) {
@@ -145,6 +109,11 @@ function comparison(bundle: TripBundle) {
     const stays = new Set(plan.days.map((day) => day.stay)).size;
     return `方案 ${String.fromCharCode(65 + index)}「${plan.name}」：${plan.tagline}；约 ${Math.round(value.distanceM / 1000)} 公里、${(value.driveS / 3600).toFixed(1)} 小时驾驶、${stays} 个住宿区域${value.tiringDays ? `，${value.tiringDays} 天强度偏高` : "，整体强度可控"}`;
   }).join("\n");
+}
+
+function changePreviewMessage(change: PlanChangeSet) {
+  const distanceDelta = Math.round((change.after.distanceM - change.before.distanceM) / 1000);
+  return `${change.summary}。预计总里程${distanceDelta === 0 ? "基本不变" : `${distanceDelta > 0 ? "增加" : "减少"} ${Math.abs(distanceDelta)} 公里`}，受影响：第 ${change.affectedDays.join("、")} 天。确认后才会写入 v${change.proposedPlan.version}。`;
 }
 
 function dayFromText(text: string) {
@@ -190,6 +159,7 @@ export class TravelAgentService {
   constructor(
     private readonly sessions: Pick<FileAgentSessionRepository, "get" | "save"> = new FileAgentSessionRepository(),
     private readonly trips: Pick<FileTripRepository, "get" | "save"> = new FileTripRepository(),
+    private readonly piRunner: PiConversationRunner | null = createPiConversationRunner(),
   ) {}
 
   async createSession(tripId?: string) {
@@ -199,7 +169,7 @@ export class TravelAgentService {
       schemaVersion: 1,
       id: id("session"),
       stage: trip ? "editing" : "collecting",
-      brief: trip ? { ...trip.request, confirmedFields: ["destination", "days"] } : defaults,
+      brief: trip ? { ...trip.request, confirmedFields: ["destination", "days"] } : briefDefaults,
       interviewQueue: trip ? [] : INTERVIEW_IDS,
       messages: [message("assistant", trip ? `已恢复你的${trip.request.destination}行程。可以继续问我路线原因，或者直接告诉我想改哪一天。` : "你好，我是去野旅行 Agent。告诉我想去哪里、玩几天、和谁同行，我会边聊边把约束整理成可执行的自驾方案。", "text", trip ? [] : ["去川西玩 5 天，2 位成人，节奏轻松", "带孩子去新疆伊犁自驾 7 天", "想做一条云南自然风光路线"])],
       tripId: trip?.id,
@@ -233,8 +203,43 @@ export class TravelAgentService {
     try { return z.array(PlanChangeOperationSchema).parse(await llm.interpretPlanChange(text, plan)); } catch { return []; }
   }
 
-  private async previewChange(bundle: TripBundle, operations: PlanChangeOperation[]): Promise<PlanChangeSet> {
-    const plan = bundle.plans.find((item) => item.id === bundle.selectedPlanId) ?? bundle.plans[0];
+  /** pi agent loop 轮：LLM 决策（问什么/何时生成/如何改），工具确定性执行；失败返回 null 交由调用方回退规则路径。 */
+  private async runPiTurn(session: AgentSession, userText: string, emit: (event: AgentEvent) => void): Promise<AgentSession | null> {
+    if (!this.piRunner) return null;
+    const bundle = session.tripId ? await this.trips.get(session.tripId) : null;
+    const outcome = await this.piRunner.run(session, userText, bundle, {
+      generateTrip,
+      previewChange: (target, operations) => this.previewChange(target, operations),
+      onProgress: (text) => emit({ type: "progress", message: text }),
+    });
+    if (!outcome) return null;
+    const now = new Date().toISOString();
+    let content = outcome.assistant.content;
+    let trip: TripBundle | undefined;
+    if (outcome.trip) {
+      trip = await this.trips.save({ ...outcome.trip, agentSessionId: session.id });
+      content = `两套方案已经准备好：\n${comparison(trip)}\n先选一套作为主方案，之后还可以继续和我调整。`;
+    } else if (outcome.pendingChange) {
+      content = changePreviewMessage(outcome.pendingChange);
+    } else if (outcome.assistant.kind === "brief" && !content) {
+      content = briefSummary(outcome.brief);
+    }
+    if (!content.trim()) return null;
+    const assistant = message("assistant", content, outcome.assistant.kind, outcome.assistant.quickReplies);
+    const saved = await this.sessions.save({
+      ...session,
+      brief: outcome.brief,
+      stage: outcome.stage ?? session.stage,
+      tripId: trip ? trip.id : session.tripId,
+      pendingChange: outcome.pendingChange ?? session.pendingChange,
+      messages: [...session.messages, assistant],
+      updatedAt: now,
+    });
+    if (trip) emit({ type: "trip", trip });
+    return saved;
+  }
+
+  private async previewChange(bundle: TripBundle, operations: PlanChangeOperation[]): Promise<PlanChangeSet> {    const plan = bundle.plans.find((item) => item.id === bundle.selectedPlanId) ?? bundle.plans[0];
     let days = plan.days.map((day) => ({ ...day, activities: [...day.activities] }));
     const affected = new Set<number>();
     for (const operation of operations) {
@@ -289,6 +294,17 @@ export class TravelAgentService {
     if (input.type === "message") {
       session = { ...session, messages: [...session.messages, message("user", input.message)], updatedAt: new Date().toISOString() };
       await this.sessions.save(session);
+
+      // 优先走 pi agent loop（LLM 自主决策 + 工具确定性执行）；不可用或失败时回退规则路径
+      const piOutcome = this.piRunner
+        ? await this.runPiTurn(session, input.message, emit)
+        : null;
+      if (piOutcome) {
+        session = piOutcome;
+        emit({ type: "session", session });
+        return { session };
+      }
+
       if (session.stage === "collecting" || session.stage === "ready") {
         emit({ type: "progress", message: "正在整理旅行条件" });
         const brief = await this.extractBrief(input.message, session.brief);
@@ -320,8 +336,7 @@ export class TravelAgentService {
         if (operations.length) {
           emit({ type: "progress", message: "正在计算调整后的路线与强度" });
           const pendingChange = await this.previewChange(bundle, operations);
-          const distanceDelta = Math.round((pendingChange.after.distanceM - pendingChange.before.distanceM) / 1000);
-          const assistant = message("assistant", `${pendingChange.summary}。预计总里程${distanceDelta === 0 ? "基本不变" : `${distanceDelta > 0 ? "增加" : "减少"} ${Math.abs(distanceDelta)} 公里`}，受影响：第 ${pendingChange.affectedDays.join("、")} 天。确认后才会写入 v${pendingChange.proposedPlan.version}。`, "change_preview", ["确认修改", "取消"]);
+          const assistant = message("assistant", changePreviewMessage(pendingChange), "change_preview", ["确认修改", "取消"]);
           session = { ...session, pendingChange, messages: [...session.messages, assistant], updatedAt: new Date().toISOString() };
         } else {
           session = { ...session, messages: [...session.messages, message("assistant", explainPlan(input.message, plan))], updatedAt: new Date().toISOString() };
@@ -354,7 +369,7 @@ export class TravelAgentService {
       const selected = bundle.plans.find((plan) => plan.id === input.planId);
       if (!selected) throw new Error("没有找到这个候选方案");
       bundle = await this.trips.save({ ...bundle, selectedPlanId: selected.id, updatedAt: new Date().toISOString() });
-      session = await this.sessions.save({ ...session, stage: "editing", messages: [...session.messages, message("assistant", `已选择「${selected.name}」。现在可以问我为什么这样安排，或直接说“第二天轻松一点”。`)], updatedAt: new Date().toISOString() });
+      session = await this.sessions.save({ ...session, stage: "editing", messages: [...session.messages, message("assistant", `已选择「${selected.name}」。现在可以问我为什么这样安排，或直接说“第二天轻松一点”。`, "system")], updatedAt: new Date().toISOString() });
     } else if (input.type === "confirm_change") {
       const change = session.pendingChange;
       if (!change) throw new Error("当前没有待确认的修改");
@@ -367,9 +382,9 @@ export class TravelAgentService {
         revisions: [...bundle.revisions, { id: id("revision"), planId: change.planId, version: change.proposedPlan.version, parentVersion: change.baseVersion, source: "agent", summary: change.summary, createdAt: now, snapshot: change.proposedPlan }],
         updatedAt: now,
       });
-      session = await this.sessions.save({ ...session, pendingChange: undefined, messages: [...session.messages, message("assistant", `修改已应用并保存为 v${change.proposedPlan.version}。地图、时间轴和强度提示已经同步。`)], updatedAt: now });
+      session = await this.sessions.save({ ...session, pendingChange: undefined, messages: [...session.messages, message("assistant", `修改已应用并保存为 v${change.proposedPlan.version}。地图、时间轴和强度提示已经同步。`, "system")], updatedAt: now });
     } else if (input.type === "cancel_change") {
-      session = await this.sessions.save({ ...session, pendingChange: undefined, messages: [...session.messages, message("assistant", "已取消这次修改，当前方案保持不变。")], updatedAt: new Date().toISOString() });
+      session = await this.sessions.save({ ...session, pendingChange: undefined, messages: [...session.messages, message("assistant", "已取消这次修改，当前方案保持不变。", "system")], updatedAt: new Date().toISOString() });
     } else if (input.type === "restore_revision") {
       const revision = bundle.revisions.find((item) => item.id === input.revisionId);
       if (!revision) throw new Error("没有找到这个历史版本");
@@ -378,7 +393,7 @@ export class TravelAgentService {
       const now = new Date().toISOString();
       const restored = { ...revision.snapshot, version: current.version + 1, createdAt: now };
       bundle = await this.trips.save({ ...bundle, plans: bundle.plans.map((plan) => plan.id === restored.id ? restored : plan), revisions: [...bundle.revisions, { id: id("revision"), planId: restored.id, version: restored.version, parentVersion: current.version, source: "restored", summary: `恢复到 v${revision.version} 的内容`, createdAt: now, snapshot: restored }], updatedAt: now });
-      session = await this.sessions.save({ ...session, messages: [...session.messages, message("assistant", `已把方案内容恢复到历史版本，并保存为新的 v${restored.version}。`)], updatedAt: now });
+      session = await this.sessions.save({ ...session, messages: [...session.messages, message("assistant", `已把方案内容恢复到历史版本，并保存为新的 v${restored.version}。`, "system")], updatedAt: now });
     }
 
     emit({ type: "trip", trip: bundle });

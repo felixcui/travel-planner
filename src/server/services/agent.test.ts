@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentSession, TripBundle } from "@/lib/domain";
+import type { AgentEvent, AgentSession, TripBundle } from "@/lib/domain";
+import type { PiConversationRunner, PiTurnOutcome } from "./pi-conversation";
 import { extractTripBriefFallback, interpretPlanChangeFallback, TravelAgentService } from "./agent";
 
 class MemorySessions {
@@ -12,6 +13,18 @@ class MemoryTrips {
   values = new Map<string, TripBundle>();
   async get(id: string) { return this.values.get(id) ?? null; }
   async save(bundle: TripBundle) { this.values.set(bundle.id, bundle); return bundle; }
+}
+
+function fakeRunner(outcome: PiTurnOutcome | null): PiConversationRunner {
+  return {
+    async run() {
+      return outcome;
+    },
+  };
+}
+
+function outcomeBase(patch: Partial<PiTurnOutcome>): PiTurnOutcome {
+  return { brief: { destination: "川西", days: 5, confirmedFields: ["destination", "days"] }, assistant: { content: "", kind: "text", quickReplies: [] }, ...patch };
 }
 
 describe("TravelAgentService", () => {
@@ -71,5 +84,68 @@ describe("TravelAgentService", () => {
     };
     await sessions.save(session); await trips.save(trip);
     await expect(new TravelAgentService(sessions, trips).handleTurn(session.id, { type: "confirm_change" })).rejects.toThrow("已经发生变化");
+  });
+
+  it("pi runner 返回追问时：写入 brief 并以 question 消息收尾，stage 不变", async () => {
+    const sessions = new MemorySessions();
+    const trips = new MemoryTrips();
+    const runner = fakeRunner(outcomeBase({
+      brief: { destination: "川西", days: 5, children: 1, confirmedFields: ["destination", "days", "children"] },
+      assistant: { content: "孩子大约几岁？", kind: "question", quickReplies: ["8岁", "10岁"] },
+    }));
+    const service = new TravelAgentService(sessions, trips, runner);
+    let session = await service.createSession();
+    ({ session } = await service.handleTurn(session.id, { type: "message", message: "带孩子去川西玩5天" }));
+    expect(session.brief.children).toBe(1);
+    expect(session.stage).toBe("collecting");
+    const last = session.messages.at(-1)!;
+    expect(last.role).toBe("assistant");
+    expect(last.kind).toBe("question");
+    expect(last.quickReplies).toEqual(["8岁", "10岁"]);
+  });
+
+  it("pi runner 返回 finalize 时：stage 变 ready，附开始规划快捷回复", async () => {
+    const sessions = new MemorySessions();
+    const trips = new MemoryTrips();
+    const runner = fakeRunner(outcomeBase({
+      stage: "ready",
+      assistant: { content: "我整理好了：川西 · 5 天 · 2 位成人。", kind: "brief", quickReplies: ["开始规划"] },
+    }));
+    const service = new TravelAgentService(sessions, trips, runner);
+    let session = await service.createSession();
+    ({ session } = await service.handleTurn(session.id, { type: "message", message: "川西5天2人，开始吧" }));
+    expect(session.stage).toBe("ready");
+    expect(session.messages.at(-1)?.kind).toBe("brief");
+    expect(session.messages.at(-1)?.quickReplies).toEqual(["开始规划"]);
+  });
+
+  it("pi runner 生成方案时：行程落库、stage 变 comparing、emit trip 事件", async () => {
+    const sessions = new MemorySessions();
+    const trips = new MemoryTrips();
+    const plan = { id: "plan_1", name: "经典", tagline: "少折返", accent: "vermillion" as const, version: 1, createdAt: "2026-08-07T00:00:00.000Z", days: [] };
+    const generated: TripBundle = {
+      schemaVersion: 2, id: "trip_gen", request: { destination: "川西", days: 5, adults: 2, children: 0, childAges: [], seniors: 0, pace: "balanced", interests: [], mustGo: [], avoid: [], earliestDeparture: "09:00", latestArrival: "19:30", maxDriveHours: 5, notes: "" },
+      plans: [plan], selectedPlanId: plan.id, sourceMode: "demo", revisions: [], createdAt: plan.createdAt, updatedAt: plan.createdAt,
+    };
+    const runner = fakeRunner(outcomeBase({ stage: "comparing", assistant: { content: "", kind: "comparison", quickReplies: [] }, trip: generated }));
+    const service = new TravelAgentService(sessions, trips, runner);
+    let session = await service.createSession();
+    const events: AgentEvent[] = [];
+    ({ session } = await service.handleTurn(session.id, { type: "message", message: "开始规划" }, (event) => events.push(event)));
+    expect(session.stage).toBe("comparing");
+    expect(session.tripId).toBe("trip_gen");
+    expect(trips.values.get("trip_gen")?.agentSessionId).toBe(session.id);
+    expect(session.messages.at(-1)?.kind).toBe("comparison");
+    expect(events.some((event) => event.type === "trip")).toBe(true);
+  });
+
+  it("pi runner 返回 null 时：回退规则路径", async () => {
+    const sessions = new MemorySessions();
+    const trips = new MemoryTrips();
+    const service = new TravelAgentService(sessions, trips, fakeRunner(null));
+    let session = await service.createSession();
+    ({ session } = await service.handleTurn(session.id, { type: "message", message: "去新疆玩10天，北疆大环线，2位成人" }));
+    expect(session.stage).toBe("collecting");
+    expect(session.messages.at(-1)?.content).toContain("必去");
   });
 });

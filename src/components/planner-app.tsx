@@ -86,7 +86,7 @@ function AgentPanel({ session, bundle, working, onTurn, onNewTrip, mobileActive 
     </header>
     <div className="agent-messages" ref={listRef}>
       {!session && <div className="agent-boot"><LoaderCircle className="spin" /><span>正在唤醒旅行 Agent</span></div>}
-      {session?.messages.map((item) => <article key={item.id} className={`agent-message ${item.role} ${item.kind}`}>
+      {session?.messages.filter((item) => item.kind !== "system").map((item) => <article key={item.id} className={`agent-message ${item.role} ${item.kind}`}>
         {item.role === "assistant" && <span className="message-avatar"><Bot /></span>}
         <div className="message-bubble"><p>{item.content}</p>{item.quickReplies.length > 0 && <div className="quick-replies">{item.quickReplies.map((reply) => <button key={reply} disabled={Boolean(working)} onClick={() => handleReply(reply)}>{reply}<ChevronRight /></button>)}</div>}</div>
       </article>)}

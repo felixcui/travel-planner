@@ -12,6 +12,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@mariozechner/pi-agent-core": "^0.73.1",
+    "@mariozechner/pi-ai": "^0.73.1",
     "@tailwindcss/postcss": "^4.1.14",
     "exceljs": "^4.4.0",
     "idb-keyval": "^6.2.2",
