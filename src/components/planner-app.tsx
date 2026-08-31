@@ -5,8 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { del, get, set } from "idb-keyval";
-import { ArrowDown, ArrowRight, ArrowUp, BedDouble, BookOpenText, Bot, CarFront, Check, ChevronRight, CircleAlert, Clock3, Download, ExternalLink, GripVertical, History, LoaderCircle, Map, MapPinned, MessageCircle, Plus, RefreshCw, Route, Send, Share2, Sparkles, Trash2, UsersRound, X } from "lucide-react";
-import type { Activity, AgentEvent, AgentSession, DayPlan, Place, Plan, TripBundle } from "@/lib/domain";
+import { ArrowDown, ArrowRight, ArrowUp, BedDouble, BookOpenText, Bot, CalendarDays, CarFront, Check, ChevronRight, CircleAlert, Clock3, Download, ExternalLink, GripVertical, History, LoaderCircle, Map, MapPinned, MessageCircle, Plus, RefreshCw, Route, Send, Share2, Sparkles, Trash2, UsersRound, X } from "lucide-react";
+import type { Activity, AgentEvent, AgentSession, DayPlan, Place, Plan, TripBundle, TripSummary } from "@/lib/domain";
 import { formatDistance, formatDuration, formatHours, id, summarizePlan } from "@/lib/utils";
 
 const TripMap = dynamic(() => import("./trip-map"), { ssr: false, loading: () => <div className="map-loading"><LoaderCircle className="spin" /> 正在展开地图…</div> });
@@ -49,13 +49,15 @@ async function readEvents(response: Response, onEvent: (event: AgentEvent) => vo
   if (buffer.trim()) onEvent(JSON.parse(buffer) as AgentEvent);
 }
 
-function AgentPanel({ session, bundle, working, onTurn, onNewTrip, mobileActive }: {
+function AgentPanel({ session, bundle, working, onTurn, onNewTrip, onTripsOpen, mobileActive, hideHeader }: {
   session: AgentSession | null;
   bundle: TripBundle | null;
   working: string;
   onTurn: (input: TurnInput) => Promise<void>;
   onNewTrip: () => void;
+  onTripsOpen: () => void;
   mobileActive: boolean;
+  hideHeader?: boolean;
 }) {
   const [input, setInput] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
@@ -79,11 +81,11 @@ function AgentPanel({ session, bundle, working, onTurn, onNewTrip, mobileActive 
   };
 
   return <section className={`agent-panel ${mobileActive ? "mobile-active" : ""}`} aria-label="旅行 Agent 对话">
-    <header className="agent-header">
+    {!hideHeader && <header className="agent-header">
       <button className="agent-mark" onClick={onNewTrip} aria-label="开始新行程"><Route /></button>
       <div><small>TRAVEL AGENT</small><strong>去野 · 旅伴</strong></div>
-      {bundle && <Link href="/trips" aria-label="查看已保存行程"><BookOpenText /></Link>}
-    </header>
+      <button className="my-trips-button" onClick={onTripsOpen} aria-label="我的行程"><BookOpenText /><span>我的行程</span></button>
+    </header>}
     <div className="agent-messages" ref={listRef}>
       {!session && <div className="agent-boot"><LoaderCircle className="spin" /><span>正在唤醒旅行 Agent</span></div>}
       {session?.messages.filter((item) => item.kind !== "system").map((item) => <article key={item.id} className={`agent-message ${item.role} ${item.kind}`}>
@@ -106,9 +108,79 @@ function AgentPanel({ session, bundle, working, onTurn, onNewTrip, mobileActive 
   </section>;
 }
 
-function BriefCanvas({ session, working, onGenerate, mobileActive }: { session: AgentSession | null; working: string; onGenerate: () => void; mobileActive: boolean }) {
+function MyTripsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [trips, setTrips] = useState<TripSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    setError("");
+    fetch("/api/trips")
+      .then((res) => res.json())
+      .then((data: { trips: TripSummary[]; error?: string }) => {
+        if (data.error) throw new Error(data.error);
+        setTrips(data.trips);
+      })
+      .catch((err: Error) => setError(err.message || "加载失败"))
+      .finally(() => setLoading(false));
+  }, [open]);
+
+  function formatDate(value: string) {
+    return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  }
+
+  return <>
+    {open && <div className="my-trips-backdrop" onClick={onClose} />}
+    <aside className={`my-trips-panel ${open ? "open" : ""}`} aria-label="我的行程">
+      <header className="my-trips-header">
+        <div><small>MY TRIPS</small><strong>我的行程</strong></div>
+        <button onClick={onClose} aria-label="关闭"><X /></button>
+      </header>
+      <div className="my-trips-body">
+        {loading && <div className="my-trips-loading"><LoaderCircle className="spin" /><span>加载中…</span></div>}
+        {error && <div className="my-trips-error"><CircleAlert />{error}</div>}
+        {!loading && !error && trips.length === 0 && (
+          <div className="my-trips-empty"><BookOpenText /><p>还没有保存的行程</p><small>生成并完成规划后自动出现在这里</small></div>
+        )}
+        {!loading && trips.map((trip) => (
+          <Link key={trip.id} className="my-trips-card" href={`/trips/${trip.id}`} onClick={onClose}>
+            <div className="my-trips-card-main">
+              <div className="my-trips-destination"><MapPinned />{trip.destination}</div>
+              <strong>{trip.selectedPlanName}</strong>
+              <time>{formatDate(trip.updatedAt)}</time>
+            </div>
+            <div className="my-trips-card-meta">
+              <span>{trip.days} 天</span>
+              <ChevronRight />
+            </div>
+          </Link>
+        ))}
+      </div>
+      {trips.length > 0 && (
+        <footer className="my-trips-footer">
+          <Link href="/trips" onClick={onClose}>查看全部 {trips.length} 份行程 <ArrowRight /></Link>
+        </footer>
+      )}
+    </aside>
+  </>;
+}
+
+function BriefCanvas({ session, working, onGenerate, mobileActive, inline }: { session: AgentSession | null; working: string; onGenerate: () => void; mobileActive: boolean; inline?: boolean }) {
   const brief = session?.brief;
   const ready = session?.stage === "ready";
+  if (inline) return <div className="brief-inline">
+    <div className="brief-title"><Sparkles /><div><small>当前旅行需求</small><strong>{brief?.destination || "等待目的地"}</strong></div><span className={ready ? "ready" : "collecting"}>{ready ? "可以规划" : "沟通中"}</span></div>
+    <div className="brief-grid">
+      <div><small>游玩天数</small><strong>{brief?.days ? `${brief.days} 天` : "待补充"}</strong></div>
+      <div><small>同行人员</small><strong>{brief ? `${brief.adults ?? 2} 成人${brief.children ? ` · ${brief.children} 儿童` : ""}${brief.seniors ? ` · ${brief.seniors} 老人` : ""}` : "待沟通"}</strong></div>
+      <div><small>旅行节奏</small><strong>{brief?.pace ? paceLabels[brief.pace] : "适中"}</strong></div>
+      <div><small>驾驶上限</small><strong>{brief?.maxDriveHours ?? 5} 小时/天</strong></div>
+    </div>
+    <div className="brief-tags"><small>偏好与必去</small>{brief?.interests?.length || brief?.mustGo?.length ? <div>{[...(brief.interests ?? []), ...(brief.mustGo ?? []).map((item) => `必去 · ${item}`)].map((item) => <span key={item}>{item}</span>)}</div> : <p>在对话中告诉我喜欢自然、人文、美食、摄影或亲子体验。</p>}</div>
+    <button className="brief-generate" disabled={!ready || Boolean(working)} onClick={onGenerate}>{working ? <LoaderCircle className="spin" /> : <Sparkles />}{working || (ready ? "生成两套自驾方案" : "继续对话补齐关键信息")}<ArrowRight /></button>
+  </div>;
   return <section className={`brief-canvas ${mobileActive ? "mobile-active" : ""}`}>
     <div className="brief-map-pattern" />
     <header><span>01</span><div><small>TRIP BRIEF</small><h1>把聊天，变成一条<br /><em>真正走得通的路</em></h1><p>不用填一整页表单。边聊边补充，我会把每个决定同步整理在这里。</p></div></header>
@@ -140,6 +212,7 @@ export default function PlannerApp({ initialBundle, readOnly = false }: { initia
   const [saveState, setSaveState] = useState<"saving" | "saved" | "error">("saved");
   const [manualDirty, setManualDirty] = useState(false);
   const [mobileView, setMobileView] = useState<"chat" | "itinerary" | "map">("chat");
+  const [tripsOpen, setTripsOpen] = useState(false);
   const latestBundle = useRef<TripBundle | null>(bundle);
   const latestManualDirty = useRef(false);
   const saveTimer = useRef<number | undefined>(undefined);
@@ -251,10 +324,40 @@ export default function PlannerApp({ initialBundle, readOnly = false }: { initia
     if (response.ok) { const created = await response.json() as AgentSession; setSession(created); await set(SESSION_KEY, created.id); }
   }
 
-  if (!bundle || !plan || !stats) return <main className="agent-shell agent-onboarding">
-    <nav className="mobile-workspace-tabs"><button className={mobileView === "chat" ? "active" : ""} onClick={() => setMobileView("chat")}><MessageCircle />对话</button><button className={mobileView === "itinerary" ? "active" : ""} onClick={() => setMobileView("itinerary")}><Route />需求</button></nav>
-    <AgentPanel session={session} bundle={null} working={working} onTurn={turn} onNewTrip={newTrip} mobileActive={mobileView === "chat"} />
-    <BriefCanvas session={session} working={working} onGenerate={() => turn({ type: "generate" })} mobileActive={mobileView === "itinerary"} />
+  if (!bundle || !plan || !stats) return <main className="home-shell">
+    <header className="home-nav">
+      <button className="home-nav-brand" onClick={newTrip} aria-label="回到首页">
+        <span className="home-nav-mark"><Route /></span>
+        <span className="home-nav-title"><strong>去野</strong><small>自驾规划</small></span>
+      </button>
+      <nav className="home-nav-links" aria-label="主导航">
+        <Link className="home-nav-link" href="/trips"><BookOpenText />我的行程</Link>
+        <Link className="home-nav-link" href="/about">关于</Link>
+      </nav>
+    </header>
+
+    <div className="home-body">
+      <div className="home-chat-area">
+        <div className="home-hero">
+          <h1>把想去的地方<br /><em>排成走得通的路</em></h1>
+          <p>告诉我目的地和行程天数，我来帮你规划一条真实可行的自驾路线。</p>
+        </div>
+        <AgentPanel session={session} bundle={null} working={working} onTurn={turn} onNewTrip={newTrip} onTripsOpen={() => setTripsOpen(true)} mobileActive={true} hideHeader />
+        <BriefCanvas session={session} working={working} onGenerate={() => turn({ type: "generate" })} mobileActive={false} inline />
+      </div>
+    </div>
+
+    <footer className="home-footer">
+      <div className="home-footer-features">
+        <span><Sparkles />渐进提问</span>
+        <span><Route />路线校验</span>
+        <span><Check />修改前确认</span>
+        <span><MessageCircle />匿名保存</span>
+      </div>
+      <p className="home-footer-copy">路线与车程由地图服务计算；估算项会明确标记。</p>
+    </footer>
+
+    <MyTripsPanel open={tripsOpen} onClose={() => setTripsOpen(false)} />
     {notice && <div className="toast" role="alert"><CircleAlert />{notice}<button onClick={() => setNotice("")}><X /></button></div>}
   </main>;
 
@@ -302,7 +405,8 @@ export default function PlannerApp({ initialBundle, readOnly = false }: { initia
 
   return <main className={`planner-shell route-workspace ${readOnly ? "shared-workspace" : "agent-workspace"}`}>
     {!readOnly && <nav className="mobile-workspace-tabs"><button className={mobileView === "chat" ? "active" : ""} onClick={() => setMobileView("chat")}><MessageCircle />对话</button><button className={mobileView === "itinerary" ? "active" : ""} onClick={() => setMobileView("itinerary")}><Route />行程</button><button className={mobileView === "map" ? "active" : ""} onClick={() => setMobileView("map")}><Map />地图</button></nav>}
-    {!readOnly && <AgentPanel session={session} bundle={bundle} working={working} onTurn={turn} onNewTrip={newTrip} mobileActive={mobileView === "chat"} />}
+    {!readOnly && <AgentPanel session={session} bundle={bundle} working={working} onTurn={turn} onNewTrip={newTrip} onTripsOpen={() => setTripsOpen(true)} mobileActive={mobileView === "chat"} />}
+    <MyTripsPanel open={tripsOpen} onClose={() => setTripsOpen(false)} />
     <section className={`route-canvas ${mobileView !== "chat" ? "mobile-active" : ""} mobile-${mobileView}`}>
       <TripMap plan={plan} selectedDayId={selectedDayId} onSelectPlace={selectPlace} />
 
