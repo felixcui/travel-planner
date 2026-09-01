@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { PlanChangeOperationSchema, TripBriefDraftSchema } from "@/lib/domain";
-import type { PlaceKnowledge, Plan, PlanChangeOperation, SearchResult, TripBriefDraft, TripRequest } from "@/lib/domain";
+import { PlanChangeOperationSchema, PlanOutlineSchema, TripBriefDraftSchema } from "@/lib/domain";
+import type { PlaceKnowledge, Plan, PlanChangeOperation, PlanOutline, SearchResult, TripBriefDraft, TripRequest } from "@/lib/domain";
 
 const PlanDraftSchema = z.object({
   plans: z.array(z.object({
@@ -12,7 +12,7 @@ const PlanDraftSchema = z.object({
       stay: z.string(),
       stayReason: z.string(),
     })),
-  })).min(2).max(2),
+  })).length(1),
 });
 export type PlanDraft = z.infer<typeof PlanDraftSchema>;
 
@@ -29,6 +29,7 @@ const KnowledgeDraftSchema = z.object({
 });
 
 export interface LlmProvider {
+  generateOutline(request: TripRequest, feedback?: { outline: PlanOutline; message: string }): Promise<PlanOutline>;
   generatePlans(request: TripRequest): Promise<PlanDraft>;
   structureKnowledge(placeName: string, sources: SearchResult[]): Promise<Omit<PlaceKnowledge, "sources" | "updatedAt" | "expiresAt" | "lockedFields">>;
   extractTripBrief(message: string, current: TripBriefDraft): Promise<TripBriefDraft>;
@@ -121,10 +122,28 @@ export class GlmChatProvider implements LlmProvider {
     }
   }
 
+  generateOutline(request: TripRequest, feedback?: { outline: PlanOutline; message: string }) {
+    const route = [
+      request.startPoint ? `第 1 天从出发地「${request.startPoint}」开始` : "",
+      request.endPoint ? `最后 1 天以「${request.endPoint}」收尾` : "",
+    ].filter(Boolean).join("，");
+    const feedbackText = feedback
+      ? `\n上一版草案（用户要调整它）：${JSON.stringify(feedback.outline)}\n用户本轮反馈：${feedback.message}\n请基于反馈修订草案，保持未提及部分稳定，输出完整新草案（version 加 1）。`
+      : "";
+    return this.complete(
+      `为以下自驾需求设计一份初步行程草案（只有骨架，不做精确计算）。恰好 ${request.days} 天。${route ? route + "。" : ""}每天 1-3 个真实、知名的地点名；住宿区域要顺路合理。${feedbackText}\n需求：${JSON.stringify(request)}\n输出：{"version":1,"summary":"一句话总览","days":[{"day":1,"title":"","places":[""],"stay":""}],"highlights":["2-4条亮点或取舍"],"notes":"备注"}`,
+      PlanOutlineSchema,
+    );
+  }
+
   generatePlans(request: TripRequest) {
     const required = request.mustGo.length ? request.mustGo.join("、") : "由你推荐";
+    const route = [
+      request.startPoint ? `第 1 天必须从出发地「${request.startPoint}」开始（首个景点从${request.startPoint}出发可达）` : "",
+      request.endPoint ? `最后 1 天必须以「${request.endPoint}」收尾（住宿选${request.endPoint}，便于结束行程）` : "",
+    ].filter(Boolean).join("；");
     return this.complete(
-      `为以下需求生成恰好两套不同的自驾方案，每套恰好 ${request.days} 天。第一套均衡经典，第二套突出兴趣且减少折返。\n需求：${JSON.stringify(request)}\n必去：${required}\n每一天 places 只放真实、可在地图检索的地点名称，1-3个；stay 是当晚住宿区域。输出：{"plans":[{"name":"","tagline":"","days":[{"title":"","places":[""],"stay":"","stayReason":""}]}]}`,
+      `为以下需求生成恰好一套自驾方案，恰好 ${request.days} 天。${route ? `路线要求：${route}。` : ""}\n需求：${JSON.stringify(request)}\n必去：${required}\n每一天 places 只放真实、可在地图检索的地点名称，1-3个；stay 是当晚住宿区域。输出：{"plans":[{"name":"","tagline":"","days":[{"title":"","places":[""],"stay":"","stayReason":""}]}]}`,
       PlanDraftSchema,
     );
   }

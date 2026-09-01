@@ -11,12 +11,14 @@ import { runAgentLoop } from "@mariozechner/pi-agent-core";
 import { Type } from "@mariozechner/pi-ai";
 import type { Static } from "@mariozechner/pi-ai";
 import type { Model } from "@mariozechner/pi-ai";
-import type { AgentMessage, AgentSession, Plan, PlanChangeOperation, PlanChangeSet, TripBriefDraft, TripBundle, TripRequest } from "@/lib/domain";
+import type { AgentMessage, AgentSession, Plan, PlanChangeOperation, PlanChangeSet, PlanOutline, TripBriefDraft, TripBundle, TripRequest } from "@/lib/domain";
 import { PlanChangeOperationSchema } from "@/lib/domain";
 import { mergeBrief, missingFields, toRequest } from "./brief-utils";
 
 export interface PiTurnDeps {
-  /** 生成两套候选方案（确定性管线：地图、强度校验、知识库） */
+  /** 生成/迭代初步草案（轻量：LLM 或确定性回退，不做地理编码与路线计算） */
+  generateOutline: (request: TripRequest, previous: PlanOutline | undefined, feedbackMessage?: string) => Promise<PlanOutline>;
+  /** 详细规划单方案（确定性管线：地图、强度校验、知识库） */
   generateTrip: (request: TripRequest) => Promise<TripBundle>;
   /** 计算修改预览（确定性执行：替换/增删/移动 + recalculate） */
   previewChange: (bundle: TripBundle, operations: PlanChangeOperation[]) => Promise<PlanChangeSet>;
@@ -31,6 +33,8 @@ export interface PiTurnOutcome {
   assistant: { content: string; kind: AgentMessage["kind"]; quickReplies: string[] };
   /** stage 迁移（工具副作用）；undefined 表示维持现状 */
   stage?: AgentSession["stage"];
+  /** 本轮产出的草案（draft_outline / 草案迭代） */
+  outline?: PlanOutline;
   /** generate_plans 工具的产物（由调用方负责持久化并 emit trip） */
   trip?: TripBundle;
   /** request_change 工具的产物（由调用方挂到 session.pendingChange） */
@@ -43,11 +47,12 @@ export interface PiConversationRunner {
 
 const TOOL_PROGRESS: Record<string, string> = {
   update_brief: "正在整理旅行条件",
-  generate_plans: "正在寻找值得停留的地方",
+  draft_outline: "正在起草初步方案",
+  generate_plans: "正在核对地点与路线",
   request_change: "正在计算调整后的路线与强度",
 };
 
-/** 空参数 schema（finalize_brief / generate_plans） */
+/** 空参数 schema（finalize_brief） */
 const EmptyParams = Type.Object({});
 
 // ---------- GLM Model（openai-completions 兼容端点） ----------
@@ -80,8 +85,8 @@ const BriefPatchSchema = Type.Object({
   interests: Type.Optional(Type.Array(Type.String(), { description: "兴趣标签，如 自然风光、人文历史、美食" })),
   mustGo: Type.Optional(Type.Array(Type.String(), { description: "必去景点或区域" })),
   avoid: Type.Optional(Type.Array(Type.String(), { description: "不想去的地方或要素" })),
-  startPoint: Type.Optional(Type.String({ description: "出发地" })),
-  endPoint: Type.Optional(Type.String({ description: "结束返回地" })),
+  startPoint: Type.Optional(Type.String({ description: "出发地：用户说“从X出发”时的 X，不是目的地" })),
+  endPoint: Type.Optional(Type.String({ description: "结束返回地：用户说“回到X/最后返回X”时的 X" })),
   earliestDeparture: Type.Optional(Type.String({ description: "每天最早出发时间 HH:mm" })),
   latestArrival: Type.Optional(Type.String({ description: "每天最晚到达时间 HH:mm" })),
   maxDriveHours: Type.Optional(Type.Number({ minimum: 1, maximum: 12, description: "单日驾驶时长上限（小时）" })),
@@ -115,6 +120,7 @@ interface TurnEffects {
   brief: TripBriefDraft;
   question: AskQuestion | null;
   finalized: boolean;
+  outline: PlanOutline | null;
   trip: TripBundle | null;
   pendingChange: PlanChangeSet | null;
 }
@@ -139,12 +145,15 @@ function transcript(messages: AgentMessage[], userText: string, limit = 12): str
 
 function buildSystemPrompt(session: AgentSession, plan: Plan | null, userText: string): string {
   const lines = [
-    "你是「去野」中文自驾旅行规划 Agent，与用户多轮对话，维护结构化的旅行需求（brief）并协助调整行程。",
+    "你是「去野」中文自驾旅行规划 Agent，与用户多轮对话，维护结构化的旅行需求（brief），先和用户共同打磨行程草案，确认后才做详细规划。",
     "",
     `当前需求档案：${JSON.stringify(session.brief)}`,
   ];
+  if (session.outline && !plan) {
+    lines.push("", `当前草案（v${session.outline.version}）：${JSON.stringify(session.outline)}`);
+  }
   if (plan) {
-    lines.push("", `当前主方案「${plan.name}」：`, planDigest(plan));
+    lines.push("", `当前已确认的详细方案「${plan.name}」：`, planDigest(plan));
   }
   if (session.pendingChange) {
     lines.push("", `当前有一个待确认的修改预览：${session.pendingChange.summary}（用户需用界面的「确认修改 / 取消」按钮处理，你只能解释它）。`);
@@ -153,13 +162,28 @@ function buildSystemPrompt(session: AgentSession, plan: Plan | null, userText: s
     transcript(session.messages, userText),
     "工作规则：",
     "- 用户消息中出现新的或修正的旅行需求时，先调用 update_brief 写入（只传本次明确提到的字段，不要猜）。",
-    plan
-      ? "- 用户的修改意图（增删换移景点、改住宿、让某天轻松）必须转换为 operations 调用 request_change，不要用文字描述代替。"
-      : "- 目的地、天数（以及带孩子时的儿童年龄）齐全后，如果还缺对规划影响大的关键偏好（必去、兴趣方向），最多再追问一轮。",
-    plan
-      ? "- 解释性提问（为什么这样安排、某景点情况、强度如何）直接用简洁中文回答，不要调用修改工具。"
-      : "- 信息已足够时调用 finalize_brief 结束收集，并用一句话向用户确认需求总结。",
-    plan ? "- 用户想确认或取消待定修改时，提示使用界面按钮，不要自行变更。" : "- 用户明确要求开始规划或生成方案时，调用 generate_plans。",
+    "- 区分「出发地/返回地」与「目的地」：用户说“从X出发”“回到X”时分别写入 startPoint / endPoint，“去X玩”才是 destination，绝不能把出发地写成 destination。",
+  );
+  if (plan) {
+    lines.push(
+      "- 用户的修改意图（增删换移景点、改住宿、让某天轻松）必须转换为 operations 调用 request_change，不要用文字描述代替。",
+      "- 解释性提问（为什么这样安排、某景点情况、强度如何）直接用简洁中文回答，不要调用修改工具。",
+      "- 用户想确认或取消待定修改时，提示使用界面按钮，不要自行变更。",
+    );
+  } else if (session.outline) {
+    lines.push(
+      "- 现在处于草案打磨阶段：用户的调整意见（换景点、改住宿、节奏、天数变化）先调用 update_brief 写入需求，再调用 draft_outline 生成新版草案。",
+      "- 用户明确确认草案（“确认”“就这样”“开始详细规划”）时调用 generate_plans 做详细规划；犹豫或继续提意见就继续打磨草案，不要急着生成。",
+      "- draft_outline 之后的文本回复要简短点出这版改了什么，不要复述整个草案（系统会渲染结构化草案卡片）。",
+    );
+  } else {
+    lines.push(
+      "- 目的地、天数（以及带孩子时的儿童年龄）齐全后，如果还缺对规划影响大的关键偏好（必去、兴趣方向），最多再追问一轮。",
+      "- 信息已足够时调用 finalize_brief 结束收集，并用一句话向用户确认需求总结。",
+      "- 用户明确要求出方案/出草案时，直接调用 draft_outline 生成初步草案（不做详细规划）。",
+    );
+  }
+  lines.push(
     "- 需要向用户提问时调用 ask_question，一次只问一个主题。",
     "- 不得编造距离、车程、票价或开放时间；涉及这些事实以工具结果为准。",
     "- 回复保持简洁中文。",
@@ -188,7 +212,7 @@ export function createPiConversationRunner(): PiConversationRunner {
       const llm = buildGlmModel();
       if (!llm) return null;
       const plan = bundle ? (bundle.plans.find((item) => item.id === bundle.selectedPlanId) ?? bundle.plans[0]) : null;
-      const effects: TurnEffects = { brief: session.brief, question: null, finalized: false, trip: null, pendingChange: null };
+      const effects: TurnEffects = { brief: session.brief, question: null, finalized: false, outline: null, trip: null, pendingChange: null };
 
       const updateBriefTool: AgentTool<typeof BriefPatchSchema> = {
         name: "update_brief",
@@ -241,23 +265,42 @@ export function createPiConversationRunner(): PiConversationRunner {
         },
       };
 
-      const generatePlansTool: AgentTool<typeof EmptyParams> = {
-        name: "generate_plans",
-        label: "生成两套方案",
-        description: "用户明确要求开始规划、或确认需求总结后要求生成时调用。需要需求档案已含目的地和天数。",
+      const draftOutlineTool: AgentTool<typeof EmptyParams> = {
+        name: "draft_outline",
+        label: "生成/更新初步草案",
+        description: "根据当前需求档案生成或迭代行程草案（每天去哪、住哪的骨架）。用户想看方案、或提出调整意见后需要出新版草案时调用。",
         parameters: EmptyParams,
         async execute() {
           const missing = missingFields(effects.brief);
           if (missing.length) throw new Error(`关键信息还缺失：${missing.join("、")}。请先追问补齐。`);
-          deps.onProgress("正在寻找值得停留的地方");
-          effects.trip = await deps.generateTrip(toRequest(effects.brief));
+          deps.onProgress("正在起草初步方案");
+          effects.outline = await deps.generateOutline(toRequest(effects.brief), session.outline, userText);
           return {
-            content: [{ type: "text", text: "两套方案已生成完毕。" }],
-            details: { tripId: effects.trip.id, planNames: effects.trip.plans.map((item) => item.name) },
+            content: [{ type: "text", text: `草案 v${effects.outline.version} 已生成：${effects.outline.summary}` }],
+            details: { version: effects.outline.version },
             terminate: true,
           };
         },
       };
+
+      const generatePlansTool: AgentTool<typeof EmptyParams> = {
+        name: "generate_plans",
+        label: "确认草案并详细规划",
+        description: "用户明确确认当前草案后调用，做详细规划（核对地点、计算路线与强度）。草案打磨阶段禁止调用；用户还在调整意见时用 draft_outline。",
+        parameters: EmptyParams,
+        async execute() {
+          const missing = missingFields(effects.brief);
+          if (missing.length) throw new Error(`关键信息还缺失：${missing.join("、")}。请先追问补齐。`);
+          if (!session.outline && !effects.outline) throw new Error("还没有草案。请先调用 draft_outline 让用户确认。");
+          deps.onProgress("正在核对地点与路线");
+          effects.trip = await deps.generateTrip(toRequest(effects.brief));
+          return {
+            content: [{ type: "text", text: "详细方案已生成完毕。" }],
+            details: { tripId: effects.trip.id, planName: effects.trip.plans[0]?.name },
+            terminate: true,
+          };
+        },
+      };;
 
       const requestChangeTool: AgentTool<typeof RequestChangeSchema> = {
         name: "request_change",
@@ -280,7 +323,8 @@ export function createPiConversationRunner(): PiConversationRunner {
 
       const tools: AgentTool[] = [updateBriefTool, askQuestionTool];
       if (plan) tools.push(requestChangeTool);
-      else tools.push(finalizeBriefTool, generatePlansTool);
+      else if (session.outline || session.stage === "drafting") tools.push(draftOutlineTool, generatePlansTool);
+      else tools.push(finalizeBriefTool, draftOutlineTool);
 
       let turns = 0;
       try {
@@ -316,8 +360,8 @@ function composeOutcome(effects: TurnEffects, messages: PiAgentMessage[]): PiTur
   if (effects.trip) {
     return {
       brief: effects.brief,
-      stage: "comparing",
-      assistant: { content: "", kind: "comparison", quickReplies: [] },
+      stage: "editing",
+      assistant: { content: "", kind: "status", quickReplies: [] },
       trip: effects.trip,
     };
   }
@@ -329,6 +373,18 @@ function composeOutcome(effects: TurnEffects, messages: PiAgentMessage[]): PiTur
     };
   }
   const assistantText = assistantTextFrom(messages);
+  if (effects.outline) {
+    return {
+      brief: effects.brief,
+      stage: "drafting",
+      outline: effects.outline,
+      assistant: {
+        content: assistantText || `草案 v${effects.outline.version} 已更新。`,
+        kind: "outline",
+        quickReplies: ["确认并详细规划", "再调整调整"],
+      },
+    };
+  }
   if (effects.question) {
     return {
       brief: effects.brief,
@@ -343,7 +399,7 @@ function composeOutcome(effects: TurnEffects, messages: PiAgentMessage[]): PiTur
     return {
       brief: effects.brief,
       stage: "ready",
-      assistant: { content: assistantText, kind: "brief", quickReplies: ["开始规划"] },
+      assistant: { content: assistantText, kind: "brief", quickReplies: ["出个初步方案"] },
     };
   }
   if (assistantText) {

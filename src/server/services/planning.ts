@@ -19,8 +19,15 @@ function fallbackDraft(request: TripRequest): PlanDraft {
   const createDays = (shift: number) => Array.from({ length: request.days }, (_, index) => {
     const first = must[(index + shift) % must.length];
     const second = must.length > 1 && request.pace !== "relaxed" ? must[(index + shift + 1) % must.length] : undefined;
+    const title = index === 0 && request.startPoint
+      ? `从${request.startPoint}出发，前往${request.destination}`
+      : index === request.days - 1 && request.endPoint
+        ? `返回${request.endPoint}，收尾行程`
+        : index === 0
+          ? `抵达${request.destination}，从容展开`
+          : `${request.destination} · 第${index + 1}日探索`;
     return {
-      title: index === 0 ? `抵达${request.destination}，从容展开` : `${request.destination} · 第${index + 1}日探索`,
+      title,
       places: [...new Set([first, second].filter((value): value is string => Boolean(value)))],
       stay: request.endPoint && index === request.days - 1 ? request.endPoint : request.destination,
       stayReason: index === request.days - 1 ? "方便结束目的地内行程" : "减少换酒店和次日折返",
@@ -28,8 +35,7 @@ function fallbackDraft(request: TripRequest): PlanDraft {
   });
   return {
     plans: [
-      { name: "均衡经典", tagline: "经典体验与驾驶强度之间取得平衡", days: createDays(0) },
-      { name: "从容探索", tagline: "换一种顺序，留出更多家庭休息时间", days: createDays(1) },
+      { name: "经典行程", tagline: "经典体验与驾驶强度之间取得平衡", days: createDays(0) },
     ],
   };
 }
@@ -50,7 +56,7 @@ async function mapLimit<T, R>(values: T[], limit: number, handler: (value: T, in
 async function resolvePlaces(names: string[], request: TripRequest) {
   const repository = new FilePlaceRepository();
   const map = new OsmMapProvider();
-  const destination = await map.geocode(request.destination, "中国");
+  const destination = await map.geocodeDestination(request.destination);
   const center = destination?.location ?? DEFAULT_CENTER;
   const unique = [...new Set(names)];
   const places: Place[] = [];
@@ -88,7 +94,7 @@ export async function resolvePlace(name: string, request: TripRequest) {
   return place;
 }
 
-async function buildPlan(draft: PlanDraft["plans"][number], index: number, places: Map<string, Place>, request: TripRequest, advisor: PlanningAdvisor | null): Promise<Plan> {
+async function buildPlan(draft: PlanDraft["plans"][number], places: Map<string, Place>, request: TripRequest, advisor: PlanningAdvisor | null): Promise<Plan> {
   const map = new OsmMapProvider();
   const dayDrafts = draft.days.slice(0, request.days);
 
@@ -196,7 +202,7 @@ async function buildPlan(draft: PlanDraft["plans"][number], index: number, place
   }
 
   return {
-    id: id("plan"), name: draft.name, tagline: draft.tagline, accent: index === 0 ? "vermillion" : "pine", version: 1,
+    id: id("plan"), name: draft.name, tagline: draft.tagline, accent: "vermillion", version: 1,
     createdAt: new Date().toISOString(), days: evaluatedDays,
   };
 }
@@ -217,7 +223,7 @@ export async function generateTrip(input: unknown): Promise<TripBundle> {
   const allNames = draft.plans.flatMap((plan) => plan.days.flatMap((day) => day.places));
   const places = await resolvePlaces(allNames, request);
   const advisor = createPlanningAdvisor();
-  const plans = await mapLimit(draft.plans.slice(0, 2), 2, (plan, index) => buildPlan(plan, index, places, request, advisor));
+  const plans = await mapLimit(draft.plans.slice(0, 1), 1, (plan) => buildPlan(plan, places, request, advisor));
   const now = new Date().toISOString();
   return TripBundleSchema.parse({
     schemaVersion: 2,

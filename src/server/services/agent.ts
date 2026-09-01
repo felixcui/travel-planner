@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { AgentEvent, AgentMessage, AgentSession, Plan, PlanChangeOperation, PlanChangeSet, TripBriefDraft, TripBundle, TripRequest } from "@/lib/domain";
+import type { AgentEvent, AgentMessage, AgentSession, Plan, PlanChangeOperation, PlanChangeSet, PlanOutline, TripBriefDraft, TripBundle, TripRequest } from "@/lib/domain";
 import { AgentSessionSchema, PlanChangeOperationSchema, TripRequestSchema } from "@/lib/domain";
 import { id, summarizePlan } from "@/lib/utils";
 import { FileAgentSessionRepository, FileTripRepository } from "../repositories/files";
@@ -11,8 +11,8 @@ import { generateTrip, recalculatePlan, resolvePlace } from "./planning";
 
 export const AgentTurnInputSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message"), message: z.string().trim().min(1).max(2000) }),
+  z.object({ type: z.literal("create_outline") }),
   z.object({ type: z.literal("generate") }),
-  z.object({ type: z.literal("select_plan"), planId: z.string() }),
   z.object({ type: z.literal("confirm_change") }),
   z.object({ type: z.literal("cancel_change") }),
   z.object({ type: z.literal("restore_revision"), revisionId: z.string() }),
@@ -29,6 +29,11 @@ const INTERVIEW_IDS = INTERVIEW_STEPS.map((step) => step.id);
 
 function isForceConfirmText(text: string) {
   return /开始规划|就这样|可以了|差不多了|都确定了|其他都随意|不用再问|开始吧|就当这样|足够了/.test(text);
+}
+
+/** drafting 阶段的“确认草案”信号：用户明确接受当前草案、要求开始详细规划 */
+function isConfirmOutlineText(text: string) {
+  return /确认|就这样|可以了|没问题|通过|同意|定了|就这个|就这份|开始详细规划|详细规划吧|生成吧/.test(text);
 }
 
 function message(role: AgentMessage["role"], content: string, kind: AgentMessage["kind"] = "text", quickReplies: string[] = []): AgentMessage {
@@ -51,7 +56,23 @@ function splitPlaces(value: string) {
 export function extractTripBriefFallback(text: string): TripBriefDraft {
   const patch: TripBriefDraft = { confirmedFields: [] };
   const confirm = (field: TripBriefDraft["confirmedFields"][number]) => patch.confirmedFields.push(field);
-  const destination = text.match(/(?:想去|准备去|打算去|到|去)([\u4e00-\u9fa5]{2,12}?)(?:玩|自驾|旅行|旅游|走|[，,。\s]|\d)/)?.[1];
+  // 先抽取出发地/返回地，并把已消费的片段从文本中剔除，避免“从成都出发…去川西”把出发地误判成目的地
+  const startMatch = text.match(/(?:从|由)([\u4e00-\u9fa5]{2,10}?)(?:出发|启程|开[车始]|动身)/)?.[1] ?? text.match(/([\u4e00-\u9fa5]{2,10}?)(?:出发|启程|动身)/)?.[1];
+  if (startMatch) {
+    patch.startPoint = startMatch.trim();
+    confirm("startPoint");
+  }
+  const endMatch = text.match(/(?:回到|返回|最后回到|最后返回|抵达|结束于)([\u4e00-\u9fa5]{2,10})/)?.[1]
+    ?? text.match(/出发回([\u4e00-\u9fa5]{2,10})/)?.[1]
+    ?? text.match(/最后([\u4e00-\u9fa5]{2,10})$/)?.[1];
+  if (endMatch) {
+    patch.endPoint = endMatch.trim();
+    confirm("endPoint");
+  }
+  const scrubbed = text
+    .replace(/(?:从|由)?[\u4e00-\u9fa5]{2,10}?(?:出发|启程|开[车始]|动身)(?:回[\u4e00-\u9fa5]{2,10})?/g, " ")
+    .replace(/(?:回到|返回|最后[回到]*|抵达|结束于)[\u4e00-\u9fa5]{2,10}/g, " ");
+  const destination = scrubbed.match(/(?:想去|准备去|打算去|到|去)([\u4e00-\u9fa5]{2,12}?)(?:玩|自驾|旅行|旅游|走|[，,。\s]|\d)/)?.[1];
   if (destination) { patch.destination = destination.replace(/一趟$/, ""); confirm("destination"); }
   const days = text.match(/([一二两三四五六七八九十\d]{1,3})\s*天/)?.[1];
   if (days) { patch.days = chineseNumber(days); confirm("days"); }
@@ -90,7 +111,12 @@ function questionFor(missing: string[]) {
 function briefSummary(brief: TripBriefDraft) {
   const pace = { relaxed: "轻松", balanced: "适中", compact: "紧凑" }[brief.pace ?? "balanced"];
   const people = `${brief.adults ?? 2} 位成人${brief.children ? `、${brief.children} 位儿童` : ""}${brief.seniors ? `、${brief.seniors} 位老人` : ""}`;
-  return `我整理好了：${brief.destination} · ${brief.days} 天 · ${people} · ${pace}节奏 · 单日驾驶不超过 ${brief.maxDriveHours ?? 5} 小时${brief.interests?.length ? ` · 偏好 ${brief.interests.join("、")}` : ""}${brief.mustGo?.length ? ` · 必去 ${brief.mustGo.join("、")}` : ""}。确认后我会生成两套可比较路线。`;
+  const route = brief.startPoint && brief.endPoint
+    ? `${brief.startPoint}出发 · ${brief.endPoint}结束 · ${brief.destination}`
+    : brief.startPoint
+      ? `${brief.startPoint}出发 · ${brief.destination}`
+      : brief.destination;
+  return `我整理好了：${route} · ${brief.days} 天 · ${people} · ${pace}节奏 · 单日驾驶不超过 ${brief.maxDriveHours ?? 5} 小时${brief.interests?.length ? ` · 偏好 ${brief.interests.join("、")}` : ""}${brief.mustGo?.length ? ` · 必去 ${brief.mustGo.join("、")}` : ""}。确认后我会先出一版初步草案，和你打磨好再详细规划。`;
 }
 
 function metrics(plan: Plan) {
@@ -103,12 +129,43 @@ function metrics(plan: Plan) {
   };
 }
 
-function comparison(bundle: TripBundle) {
-  return bundle.plans.map((plan, index) => {
-    const value = metrics(plan);
-    const stays = new Set(plan.days.map((day) => day.stay)).size;
-    return `方案 ${String.fromCharCode(65 + index)}「${plan.name}」：${plan.tagline}；约 ${Math.round(value.distanceM / 1000)} 公里、${(value.driveS / 3600).toFixed(1)} 小时驾驶、${stays} 个住宿区域${value.tiringDays ? `，${value.tiringDays} 天强度偏高` : "，整体强度可控"}`;
-  }).join("\n");
+/** 草案的可读介绍文本（对话流中展示） */
+function outlineText(outline: PlanOutline) {
+  const days = outline.days.map((day) => `第 ${day.day} 天 · ${day.title}\n　路线：${day.places.join(" → ") || "灵活安排"}\n　住宿：${day.stay}`).join("\n");
+  const highlights = outline.highlights.length ? `\n\n亮点与取舍：\n${outline.highlights.map((item) => `· ${item}`).join("\n")}` : "";
+  return `${outline.summary}\n\n${days}${highlights}`;
+}
+
+/** 确定性草案（LLM 不可用时的回退）：从 brief 直接拼每日骨架 */
+function fallbackOutline(request: TripRequest, version: number, previous?: PlanOutline): PlanOutline {
+  const days = Array.from({ length: request.days }, (_, index) => {
+    const mustGoPlace = request.mustGo[index % Math.max(1, request.mustGo.length)];
+    const places = request.mustGo.length
+      ? request.mustGo.slice(index * 2, index * 2 + 2)
+      : [mustGoPlace || `${request.destination}代表景区`];
+    const title = index === 0 && request.startPoint
+      ? `从${request.startPoint}出发，前往${request.destination}`
+      : index === request.days - 1 && request.endPoint
+        ? `返回${request.endPoint}，收尾行程`
+        : `第 ${index + 1} 天 · ${request.destination}`;
+    return {
+      day: index + 1,
+      title,
+      places: places.filter(Boolean),
+      stay: request.endPoint && index === request.days - 1 ? request.endPoint : request.destination,
+    };
+  });
+  return {
+    version: previous ? previous.version + 1 : version,
+    summary: `${request.destination} ${request.days} 天自驾草案：围绕${request.mustGo.length ? `必去点（${request.mustGo.join("、")}）` : "经典区域"}安排，${request.interests.length ? `侧重${request.interests.join("、")}，` : ""}单日驾驶不超过 ${request.maxDriveHours} 小时。`,
+    days,
+    highlights: [
+      request.startPoint ? `从${request.startPoint}出发` : "",
+      request.endPoint ? `最后返回${request.endPoint}` : "",
+      request.children + request.seniors > 0 ? "行程照顾同行儿童/老人，节奏放缓" : "",
+    ].filter(Boolean),
+    notes: previous ? "（根据你的反馈更新）" : "",
+  };
 }
 
 function changePreviewMessage(change: PlanChangeSet) {
@@ -190,9 +247,45 @@ export class TravelAgentService {
 
   private async extractBrief(text: string, current: TripBriefDraft) {
     const fallback = extractTripBriefFallback(text);
+    // 用户只说了出发地（如“从成都出发自驾 5 天”）且此前无目的地时，用出发地兜底，避免卡死收集阶段；
+    // 已有 destination 的修改轮不做覆盖，防止出发地误写为目的地
+    const patched = !fallback.destination && !current.destination && fallback.startPoint
+      ? { ...fallback, destination: fallback.startPoint, confirmedFields: [...fallback.confirmedFields, "destination" as const] }
+      : fallback;
     const llm = createLlmProvider();
-    if (!llm) return mergeBrief(current, fallback);
-    try { return mergeBrief(current, fallback, await llm.extractTripBrief(text, current)); } catch { return mergeBrief(current, fallback); }
+    if (!llm) return mergeBrief(current, patched);
+    try { return mergeBrief(current, patched, await llm.extractTripBrief(text, current)); } catch { return mergeBrief(current, patched); }
+  }
+
+  /** 生成/迭代行程草案：LLM 优先（带反馈上下文），失败回退确定性草案 */
+  private async draftOutline(source: TripBriefDraft | TripRequest, previous: PlanOutline | undefined, feedbackMessage?: string): Promise<PlanOutline> {
+    const request = "confirmedFields" in source ? toRequest(source) : source;
+    const llm = createLlmProvider();
+    if (llm) {
+      try {
+        const outline = await llm.generateOutline(request, previous && feedbackMessage ? { outline: previous, message: feedbackMessage } : undefined);
+        return { ...outline, version: previous ? previous.version + 1 : Math.max(1, outline.version) };
+      } catch {
+        // 回退确定性草案
+      }
+    }
+    return fallbackOutline(request, previous ? previous.version + 1 : 1, previous);
+  }
+
+  /** 详细规划并落库：单方案 TripBundle → stage editing → emit trip/session */
+  private async generateIntoSession(session: AgentSession, emit: (event: AgentEvent) => void) {
+    emit({ type: "progress", message: "正在核对地点与路线" });
+    let bundle = await generateTrip(toRequest(session.brief));
+    bundle = { ...bundle, agentSessionId: session.id };
+    await this.trips.save(bundle);
+    const plan = bundle.plans.find((item) => item.id === bundle.selectedPlanId) ?? bundle.plans[0];
+    const value = metrics(plan);
+    const stays = new Set(plan.days.map((day) => day.stay)).size;
+    const assistant = message("assistant", `详细方案「${plan.name}」已生成：约 ${Math.round(value.distanceM / 1000)} 公里、${(value.driveS / 3600).toFixed(1)} 小时驾驶、${stays} 个住宿区域${value.tiringDays ? `，${value.tiringDays} 天强度偏高（可在对话里让我调整）` : "，整体强度可控"}。右侧地图和每日路书已就绪，继续对话可以微调。`, "status");
+    const saved = await this.sessions.save({ ...session, stage: "editing", tripId: bundle.id, messages: [...session.messages, assistant], updatedAt: new Date().toISOString() });
+    emit({ type: "trip", trip: bundle });
+    emit({ type: "session", session: saved });
+    return { session: saved, trip: bundle };
   }
 
   private async interpretChange(text: string, plan: Plan) {
@@ -208,6 +301,7 @@ export class TravelAgentService {
     if (!this.piRunner) return null;
     const bundle = session.tripId ? await this.trips.get(session.tripId) : null;
     const outcome = await this.piRunner.run(session, userText, bundle, {
+      generateOutline: (request, previous, feedback) => this.draftOutline(request, previous, feedback),
       generateTrip,
       previewChange: (target, operations) => this.previewChange(target, operations),
       onProgress: (text) => emit({ type: "progress", message: text }),
@@ -217,8 +311,13 @@ export class TravelAgentService {
     let content = outcome.assistant.content;
     let trip: TripBundle | undefined;
     if (outcome.trip) {
-      trip = await this.trips.save({ ...outcome.trip, agentSessionId: session.id });
-      content = `两套方案已经准备好：\n${comparison(trip)}\n先选一套作为主方案，之后还可以继续和我调整。`;
+      const savedTrip = await this.trips.save({ ...outcome.trip, agentSessionId: session.id });
+      trip = savedTrip;
+      const plan = savedTrip.plans.find((item) => item.id === savedTrip.selectedPlanId) ?? savedTrip.plans[0];
+      const value = metrics(plan);
+      content = `详细方案「${plan.name}」已生成：约 ${Math.round(value.distanceM / 1000)} 公里、${(value.driveS / 3600).toFixed(1)} 小时驾驶${value.tiringDays ? `，${value.tiringDays} 天强度偏高（可以让我调整）` : "，整体强度可控"}。右侧地图和每日路书已就绪。`;
+    } else if (outcome.outline) {
+      content = content || `草案 v${outcome.outline.version}：${outcome.outline.summary}`;
     } else if (outcome.pendingChange) {
       content = changePreviewMessage(outcome.pendingChange);
     } else if (outcome.assistant.kind === "brief" && !content) {
@@ -230,6 +329,7 @@ export class TravelAgentService {
       ...session,
       brief: outcome.brief,
       stage: outcome.stage ?? session.stage,
+      outline: outcome.outline ?? (outcome.trip ? undefined : session.outline),
       tripId: trip ? trip.id : session.tripId,
       pendingChange: outcome.pendingChange ?? session.pendingChange,
       messages: [...session.messages, assistant],
@@ -305,6 +405,11 @@ export class TravelAgentService {
         return { session };
       }
 
+      // 旧版 comparing 会话（两套方案待选）迁移为 editing（以 selectedPlanId 为主方案）
+      if (session.stage === "comparing") {
+        session = { ...session, stage: "editing" };
+      }
+
       if (session.stage === "collecting" || session.stage === "ready") {
         emit({ type: "progress", message: "正在整理旅行条件" });
         const brief = await this.extractBrief(input.message, session.brief);
@@ -321,13 +426,24 @@ export class TravelAgentService {
             const assistant = message("assistant", step.question, "question", step.quickReplies);
             session = { ...session, brief, interviewQueue: remaining.slice(1), stage: "collecting", messages: [...session.messages, assistant], updatedAt: now };
           } else {
-            const assistant = message("assistant", briefSummary(brief), "brief", ["开始规划"]);
+            const assistant = message("assistant", briefSummary(brief), "brief", ["出个初步方案"]);
             session = { ...session, brief, interviewQueue: [], stage: "ready", messages: [...session.messages, assistant], updatedAt: now };
           }
         } else {
-          const assistant = message("assistant", briefSummary(brief), "brief", ["开始规划"]);
+          const assistant = message("assistant", briefSummary(brief), "brief", ["出个初步方案"]);
           session = { ...session, brief, interviewQueue: [], stage: "ready", messages: [...session.messages, assistant], updatedAt: now };
         }
+      } else if (session.stage === "drafting") {
+        emit({ type: "progress", message: "正在更新方案草案" });
+        const brief = await this.extractBrief(input.message, session.brief);
+        if (isConfirmOutlineText(input.message) && session.outline) {
+          const assistant = message("assistant", "好的，确认这份草案。我现在做详细规划：核对每个地点、计算路线和每天强度，完成后地图上见。", "status");
+          session = await this.sessions.save({ ...session, brief, messages: [...session.messages, assistant], updatedAt: new Date().toISOString() });
+          return await this.generateIntoSession(session, emit);
+        }
+        const outline = await this.draftOutline(brief, session.outline, input.message);
+        const assistant = message("assistant", `草案更新（v${outline.version}）：\n${outlineText(outline)}\n\n有想调整的地方继续说，或点「确认并详细规划」。`, "outline", ["确认并详细规划", "再调整调整"]);
+        session = { ...session, brief, outline, messages: [...session.messages, assistant], updatedAt: new Date().toISOString() };
       } else {
         const bundle = session.tripId ? await this.trips.get(session.tripId) : null;
         if (!bundle) throw new Error("没有找到当前行程，请重新生成");
@@ -347,30 +463,29 @@ export class TravelAgentService {
       return { session };
     }
 
-    if (input.type === "generate") {
-      if (session.stage !== "ready") throw new Error("请先补齐目的地和旅行天数");
-      session = await this.sessions.save({ ...session, stage: "generating", messages: [...session.messages, message("assistant", "开始规划。我会核对地点、路线和每天的驾驶强度。", "status")], updatedAt: new Date().toISOString() });
-      emit({ type: "progress", message: "正在寻找值得停留的地方" });
-      let bundle = await generateTrip(toRequest(session.brief));
-      bundle = { ...bundle, agentSessionId: session.id };
-      await this.trips.save(bundle);
-      const assistant = message("assistant", `两套方案已经准备好：\n${comparison(bundle)}\n先选一套作为主方案，之后还可以继续和我调整。`, "comparison");
-      session = await this.sessions.save({ ...session, stage: "comparing", tripId: bundle.id, messages: [...session.messages, assistant], updatedAt: new Date().toISOString() });
-      emit({ type: "trip", trip: bundle });
+    if (input.type === "create_outline") {
+      if (session.stage !== "ready" && session.stage !== "drafting") throw new Error("请先补齐目的地和旅行天数");
+      emit({ type: "progress", message: "正在起草初步方案" });
+      const outline = await this.draftOutline(session.brief, session.outline);
+      const assistant = message("assistant", `初步方案来了（v${outline.version}）：\n${outlineText(outline)}\n\n直接说哪里想调整，我马上改；满意就点「确认并详细规划」。`, "outline", ["确认并详细规划", "再调整调整"]);
+      session = await this.sessions.save({ ...session, stage: "drafting", outline, messages: [...session.messages, assistant], updatedAt: new Date().toISOString() });
       emit({ type: "session", session });
-      return { session, trip: bundle };
+      return { session };
+    }
+
+    if (input.type === "generate") {
+      if (session.stage === "collecting") throw new Error("请先补齐目的地和旅行天数");
+      if (session.stage !== "drafting") throw new Error("请先出初步方案，确认草案后再详细规划");
+      if (!session.outline) throw new Error("还没有草案，请先生成初步方案");
+      session = await this.sessions.save({ ...session, stage: "generating", messages: [...session.messages, message("assistant", "开始详细规划。我会核对地点、路线和每天的驾驶强度。", "status")], updatedAt: new Date().toISOString() });
+      return await this.generateIntoSession(session, emit);
     }
 
     if (!session.tripId) throw new Error("当前还没有生成行程");
     let bundle = await this.trips.get(session.tripId);
     if (!bundle) throw new Error("行程不存在或已失效");
 
-    if (input.type === "select_plan") {
-      const selected = bundle.plans.find((plan) => plan.id === input.planId);
-      if (!selected) throw new Error("没有找到这个候选方案");
-      bundle = await this.trips.save({ ...bundle, selectedPlanId: selected.id, updatedAt: new Date().toISOString() });
-      session = await this.sessions.save({ ...session, stage: "editing", messages: [...session.messages, message("assistant", `已选择「${selected.name}」。现在可以问我为什么这样安排，或直接说“第二天轻松一点”。`, "system")], updatedAt: new Date().toISOString() });
-    } else if (input.type === "confirm_change") {
+    if (input.type === "confirm_change") {
       const change = session.pendingChange;
       if (!change) throw new Error("当前没有待确认的修改");
       const current = bundle.plans.find((plan) => plan.id === change.planId);

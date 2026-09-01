@@ -192,10 +192,25 @@ export const TripBriefDraftSchema = TripRequestSchema.partial().extend({
 });
 export type TripBriefDraft = z.infer<typeof TripBriefDraftSchema>;
 
+/** 对话阶段的初步方案草案：只有行程骨架（每天去哪、住哪），不做地理编码与路线计算 */
+export const PlanOutlineSchema = z.object({
+  version: z.number().int().positive(),
+  summary: z.string(),
+  days: z.array(z.object({
+    day: z.number().int().positive(),
+    title: z.string(),
+    places: z.array(z.string()).default([]),
+    stay: z.string(),
+  })),
+  highlights: z.array(z.string()).default([]),
+  notes: z.string().default(""),
+});
+export type PlanOutline = z.infer<typeof PlanOutlineSchema>;
+
 export const AgentMessageSchema = z.object({
   id: z.string(),
   role: z.enum(["user", "assistant"]),
-  kind: z.enum(["text", "question", "brief", "comparison", "change_preview", "status", "system", "error"]).default("text"),
+  kind: z.enum(["text", "question", "brief", "outline", "comparison", "change_preview", "status", "system", "error"]).default("text"),
   content: z.string(),
   quickReplies: z.array(z.string()).default([]),
   createdAt: z.string(),
@@ -236,8 +251,9 @@ export type PlanChangeSet = z.infer<typeof PlanChangeSetSchema>;
 export const AgentSessionSchema = z.object({
   schemaVersion: z.literal(1),
   id: z.string(),
-  stage: z.enum(["collecting", "ready", "generating", "comparing", "editing"]),
+  stage: z.enum(["collecting", "ready", "drafting", "generating", "comparing", "editing"]),
   brief: TripBriefDraftSchema,
+  outline: PlanOutlineSchema.optional(),
   interviewQueue: z.array(z.string()).default([]),
   messages: z.array(AgentMessageSchema),
   tripId: z.string().optional(),
