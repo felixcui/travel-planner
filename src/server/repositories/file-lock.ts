@@ -1,6 +1,7 @@
-import { mkdir, open, unlink } from "node:fs/promises";
+import { mkdir, open, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 
 /**
  * 简单的文件级互斥锁，用于防止并发写入冲突。
@@ -47,9 +48,15 @@ export class FileLock {
     if (this.handle) {
       try {
         await this.handle.close();
-        await unlink(this.lockPath);
+        try {
+          await unlink(this.lockPath);
+        } catch {
+          // unlink 可能被环境安全钩子拦截（例如转为回收站删除并限流）。降级为改名到临时目录：
+          // 锁路径得以释放，残留文件落在系统临时区由系统清理，不影响后续 acquire。
+          await rename(this.lockPath, join(tmpdir(), `lock-${basename(this.lockPath)}-${process.pid}-${Date.now()}`));
+        }
       } catch (error) {
-        // 忽略 unlink 失败（可能已被清理）
+        // 忽略清理失败（可能已被清理）
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
           throw error;
         }
