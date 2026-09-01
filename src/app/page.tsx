@@ -1,3 +1,3 @@
-import PlannerApp from "@/components/planner-app";
+import HomeLanding from "@/components/home-landing";
 
-export default function HomePage() { return <PlannerApp />; }
+export default function HomePage() { return <HomeLanding />; }

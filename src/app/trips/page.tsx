@@ -18,7 +18,7 @@ export default async function TripsPage() {
   return <main className="archive-shell">
     <header className="archive-header">
       <Link className="archive-brand" href="/"><span><Route /></span><div><small>ROADBOOK ARCHIVE</small><strong>去野 · 我的行程</strong></div></Link>
-      <Link className="new-trip-button" href="/"><Plus />规划新旅程</Link>
+      <Link className="new-trip-button" href="/plan"><Plus />规划新旅程</Link>
     </header>
     <section className="archive-hero">
       <div><span className="archive-index">02</span><div><p>每一次出发都有迹可循</p><h1>已保存的<br /><em>旅行路书</em></h1></div></div>
@@ -40,6 +40,6 @@ export default async function TripsPage() {
         </div>
         <span className="archive-open">打开路书 <ArrowRight /></span>
       </Link>)}
-    </section> : <section className="archive-empty"><BookOpenText /><span>NO ROADBOOK YET</span><h2>还没有保存的旅行规划</h2><p>完成第一次生成后，路线会自动出现在这里。</p><Link href="/">开始规划 <ArrowRight /></Link></section>}
+    </section> : <section className="archive-empty"><BookOpenText /><span>NO ROADBOOK YET</span><h2>还没有保存的旅行规划</h2><p>完成第一次生成后，路线会自动出现在这里。</p><Link href="/plan">开始规划 <ArrowRight /></Link></section>}
   </main>;
 }
