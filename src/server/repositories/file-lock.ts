@@ -9,8 +9,11 @@ import { tmpdir } from "node:os";
  */
 export class FileLock {
   private handle: FileHandle | null = null;
+  private readonly lockPath: string;
 
-  constructor(private readonly lockPath: string) {}
+  constructor(lockPath: string) {
+    this.lockPath = lockPath;
+  }
 
   /**
    * 获取锁。如果锁已被其他进程持有，会重试直到超时。

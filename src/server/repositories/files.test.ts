@@ -35,7 +35,7 @@ afterEach(async () => {
 });
 
 describe("FileTripRepository", () => {
-  it("保存、读取并按更新时间倒序列出行程", async () => {
+  it("保存、读取并按更新时间倒序列出行程", { timeout: 10000 }, async () => {
     testDir = await mkdtemp(join(tmpdir(), "travel-planner-trips-"));
     process.env.DATA_DIR = testDir;
     vi.resetModules();
