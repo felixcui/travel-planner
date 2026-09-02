@@ -5,7 +5,11 @@ import type { AgentSession, Place, TripBundle } from "@/lib/domain";
 import { AgentSessionSchema, migrateTripBundle, PlaceSchema, TripBundleSchema } from "@/lib/domain";
 import { getLockPath, withLock } from "./file-lock";
 
-const root = resolve(/* turbopackIgnore: true */ process.cwd(), process.env.DATA_DIR ?? "./data");
+// Vercel Serverless Functions 的运行时文件系统只读，唯一可写目录是 /tmp；
+// 本地开发仍使用项目目录下的 data 文件夹。
+const root = process.env.VERCEL
+  ? resolve("/tmp", process.env.DATA_DIR ?? "data")
+  : resolve(/* turbopackIgnore: true */ process.cwd(), process.env.DATA_DIR ?? "./data");
 const stableHash = (value: string) => createHash("sha256").update(value).digest("hex");
 
 async function atomicWrite(path: string, value: unknown) {
