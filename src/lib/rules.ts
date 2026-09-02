@@ -2,10 +2,12 @@ import type { DayPlan, TripRequest, ValidationIssue } from "./domain";
 import { clockToMinutes, deriveIntensity, id, minutesToClock } from "./utils";
 
 export function applyDayRules(day: DayPlan, request: TripRequest): DayPlan {
-  // 新结构：segments 首段为“当日出发地 → 当天第一个景点”，segments 数 = 景点数（含出发段）。
-  // 兼容旧数据（segments 数 = 景点数 - 1，无出发段）：到达第 i 个景点前累加 segments[i-1]。
+  // 结构说明：旧数据 segments 数 = 景点数 - 1（仅景点间，无出发/入住段）；
+  // 新结构首段为“当日出发地 → 当天第一个景点”（segments 数 = 景点数），
+  // 闭环结构再追加末段“最后景点 → 当日住宿地”（segments 数 = 景点数 + 1）。
+  // 到达第 i 个景点前：有出发段则累加 segments[i]，否则累加 segments[i-1]。
   const placeActivities = day.activities.filter((item) => item.type === "place");
-  const withOriginSegment = day.segments.length === placeActivities.length;
+  const withOriginSegment = day.segments.length >= placeActivities.length;
   let cursor = 0;
   let placeIndex = 0;
   const activities = day.activities.map((activity, index) => {

@@ -94,24 +94,25 @@ function stripParenthetical(name: string) {
 }
 
 /**
- * 解析“当日出发地”（首日 = startPoint/destination，之后 = 前一日 stay）为 Place。
- * 优先在已解析景点中匹配（精确 / 剥括号 / 别名），失败才走 geocode 兜底并入库。
- * 返回 null 表示解析失败，调用方应跳过出发段（保守不引入坏坐标）。
+ * 解析“出发点/住宿地”地名（首日出发地 = startPoint/destination；之后 = 前一日 stay；当日住宿地 = 当日 stay）为 Place。
+ * 优先在已解析景点与已有入库 Place 中匹配（精确 / 剥括号 / 别名），失败才走 geocode 兜底并入库。
+ * 返回 null 表示解析失败，调用方应跳过该段（保守不引入坏坐标）。
  */
-async function resolveOriginPlace(name: string, fallback: Place | undefined, request: TripRequest, knownPlaces: Iterable<Place>): Promise<Place | null> {
+async function resolveOriginPlace(name: string, request: TripRequest, knownPlaces: Iterable<Place>): Promise<Place | null> {
   if (!name) return null;
   const base = stripParenthetical(name);
-  const all = [...knownPlaces];
+  const repository = new FilePlaceRepository();
   for (const candidate of [name, base]) {
-    const hit = all.find((place) => place.name === candidate || place.aliases.includes(candidate));
-    if (hit) return hit;
+    for (const place of knownPlaces) {
+      if (place.name === candidate || place.aliases.includes(candidate)) return place;
+    }
+    const existing = await repository.findByName(candidate);
+    if (existing) return existing;
   }
-  if (fallback && (fallback.name === base || base.includes(fallback.name) || fallback.name.includes(base))) return fallback;
   try {
     const map = new OsmMapProvider();
     const center = (await map.geocodeDestination(request.destination))?.location ?? DEFAULT_CENTER;
     const geocoded = await geocodeOrEstimate(map, base, request.destination, center, 0);
-    const repository = new FilePlaceRepository();
     const place: Place = {
       id: id("place"), name: base, aliases: [], address: geocoded.address,
       category: "住宿", location: geocoded.location,
@@ -129,13 +130,18 @@ async function resolveOriginPlace(name: string, fallback: Place | undefined, req
 }
 
 /**
- * 组装每日路线：segments 的第 1 段固定为“当日出发地 → 当天第一个景点”，
- * 保证前后天路线连贯（前一天住在 A，后一天从 A 出发）。
- * 返回 { routePlaces, segments }，routePlaces 含出发地（若与首景点同名则不重复插入）。
+ * 组装每日路线：首段固定为“当日出发地 → 当天第一个景点”，
+ * 末段在“当日住宿地 ≠ 最后景点（且相距 > 3km）”时追加“最后景点 → 住宿地”，
+ * 保证路线从住宿地出发、到住宿地收尾，前后天闭环衔接（前一天住 A，后一天从 A 出发）。
+ * 返回 { routePlaces, segments }。
  */
-async function assembleRoute(inputPlaces: Place[], origin: Place | undefined, map: OsmMapProvider) {
+async function assembleRoute(inputPlaces: Place[], origin: Place | undefined, stay: Place | undefined, map: OsmMapProvider) {
   const routePlaces = [...inputPlaces];
   if (origin && origin.name !== routePlaces[0]?.name) routePlaces.unshift(origin);
+  const lastActivity = inputPlaces[inputPlaces.length - 1];
+  if (stay && lastActivity && stay.name !== lastActivity.name && haversine(stay.location, lastActivity.location) / 1000 > 3) {
+    routePlaces.push(stay);
+  }
   const segments = await Promise.all(routePlaces.slice(0, -1).map((from, segmentIndex) => map.calculateRoute(from, routePlaces[segmentIndex + 1])));
   return { routePlaces, segments };
 }
@@ -180,10 +186,11 @@ async function buildPlan(draft: PlanDraft["plans"][number], places: Map<string, 
       id: id("activity"), type: "place", place, startTime: "", endTime: "", durationMin: dayDurations?.get(place.name) ?? place.knowledge.suggestedDurationMin, note: place.knowledge.playTips[0] ?? "",
     }));
     const assemble = async (inputActivities: Activity[]) => {
-      // 当日出发地：首日 = startPoint ?? destination；之后 = 前一日 stay（保证前后天路线连贯）
+      // 当日出发地：首日 = startPoint ?? destination；之后 = 前一日 stay；住宿地 = 当日 stay（保证前后天路线闭环）
       const originName = dayIndex === 0 ? (request.startPoint ?? request.destination) : dayDrafts[dayIndex - 1].stay;
-      const origin = await resolveOriginPlace(originName, inputActivities[0]?.place, request, places.values());
-      const { routePlaces, segments } = await assembleRoute(inputActivities.map((activity) => activity.place), origin ?? undefined, map);
+      const origin = await resolveOriginPlace(originName, request, places.values());
+      const stay = await resolveOriginPlace(dayDraft.stay, request, places.values());
+      const { routePlaces, segments } = await assembleRoute(inputActivities.map((activity) => activity.place), origin ?? undefined, stay ?? undefined, map);
       const totalDistanceM = segments.reduce((sum, segment) => sum + segment.distanceM, 0);
       const totalDriveS = segments.reduce((sum, segment) => sum + segment.durationS, 0);
       const familyBuffer = (request.children > 0 || request.seniors > 0) ? Math.max(0, routePlaces.length - 1) * 20 : 0;
@@ -303,10 +310,11 @@ export async function recalculatePlan(requestInput: unknown, planInput: Plan, af
   const days = await mapLimit(planInput.days, 2, async (day, dayIndex) => {
     if (affected && !affected.has(day.day)) return day;
     const places = day.activities.filter((item) => item.type === "place").map((item) => item.place);
-    // 当日出发地：首日 = startPoint ?? destination；之后 = 前一日 stay（保证前后天路线连贯）
+    // 当日出发地：首日 = startPoint ?? destination；之后 = 前一日 stay；住宿地 = 当日 stay（保证前后天路线闭环）
     const originName = dayIndex === 0 ? (request.startPoint ?? request.destination) : planInput.days[dayIndex - 1].stay;
-    const origin = await resolveOriginPlace(originName, places[0], request, allPlaces);
-    const { segments } = await assembleRoute(places, origin ?? undefined, map);
+    const origin = await resolveOriginPlace(originName, request, allPlaces);
+    const stay = await resolveOriginPlace(day.stay, request, allPlaces);
+    const { segments } = await assembleRoute(places, origin ?? undefined, stay ?? undefined, map);
     return applyDayRules({
       ...day,
       segments,

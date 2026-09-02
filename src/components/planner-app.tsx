@@ -299,8 +299,9 @@ export default function PlannerApp({ initialBundle, initialMessage, readOnly = f
   const plan = useMemo(() => bundle?.plans.find((item) => item.id === bundle.selectedPlanId) ?? bundle?.plans[0], [bundle]);
   const selectedDay = plan?.days.find((day) => day.id === selectedDayId) ?? plan?.days[0];
   const selectedActivity = selectedDay?.activities.find((activity) => activity.place.id === selectedPlaceId);
-  // 新结构（segments 首段为“当日出发地 → 第一景点”）时，segments 数 = place 活动数；旧数据无出发段。
-  const hasOriginSegment = !!selectedDay && selectedDay.segments.length === selectedDay.activities.filter((item) => item.type === "place").length;
+  // 结构判断：segments 含“出发段”（首段为“当日出发地 → 第一景点”）时，segments 数 ≥ place 活动数
+  // （闭环结构再含末段“最后景点 → 住宿地”，segments 数 = place 活动数 + 1）；旧数据无出发段。
+  const hasOriginSegment = !!selectedDay && selectedDay.segments.length >= selectedDay.activities.filter((item) => item.type === "place").length;
   const stats = plan ? summarizePlan(plan) : null;
 
   async function turn(input: TurnInput, sessionOverride?: AgentSession) {
