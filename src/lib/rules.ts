@@ -2,9 +2,18 @@ import type { DayPlan, TripRequest, ValidationIssue } from "./domain";
 import { clockToMinutes, deriveIntensity, id, minutesToClock } from "./utils";
 
 export function applyDayRules(day: DayPlan, request: TripRequest): DayPlan {
+  // 新结构：segments 首段为“当日出发地 → 当天第一个景点”，segments 数 = 景点数（含出发段）。
+  // 兼容旧数据（segments 数 = 景点数 - 1，无出发段）：到达第 i 个景点前累加 segments[i-1]。
+  const placeActivities = day.activities.filter((item) => item.type === "place");
+  const withOriginSegment = day.segments.length === placeActivities.length;
   let cursor = 0;
+  let placeIndex = 0;
   const activities = day.activities.map((activity, index) => {
-    if (index > 0) cursor += (day.segments[index - 1]?.durationS ?? 0) / 60;
+    if (activity.type === "place") {
+      if (withOriginSegment) cursor += (day.segments[placeIndex]?.durationS ?? 0) / 60;
+      else if (placeIndex > 0) cursor += (day.segments[placeIndex - 1]?.durationS ?? 0) / 60;
+      placeIndex += 1;
+    }
     const startTime = minutesToClock(request.earliestDeparture, cursor);
     cursor += activity.durationMin;
     const endTime = minutesToClock(request.earliestDeparture, cursor);

@@ -8,7 +8,11 @@ import type { DayPlan, Plan, Place } from "@/lib/domain";
 function FitRoute({ days }: { days: DayPlan[] }) {
   const map = useMap();
   useEffect(() => {
-    const points = days.flatMap((day) => day.activities.map((activity) => [activity.place.location.lat, activity.place.location.lng] as [number, number]));
+    // 同时纳入路线几何点：segments 首段可能是“前日住宿地 → 今日第一景点”，视野需覆盖出发地
+    const points = days.flatMap((day) => [
+      ...day.activities.map((activity) => [activity.place.location.lat, activity.place.location.lng] as [number, number]),
+      ...day.segments.flatMap((segment) => segment.geometry.map((point) => [point.lat, point.lng] as [number, number])),
+    ]);
     if (points.length === 1) map.setView(points[0], 9);
     else if (points.length > 1) map.fitBounds(L.latLngBounds(points), { padding: [50, 50] });
   }, [days, map]);
