@@ -11,6 +11,7 @@ const nextConfig: NextConfig = {
   // 源码和本地数据文件都不属于函数运行时依赖，必须从部署产物中排除。
   outputFileTracingExcludes: {
     "/*": [
+      ".next/lock",
       ".next/cache/**/*",
       ".next/dev/**/*",
       "data/**/*",
