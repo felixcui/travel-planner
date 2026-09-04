@@ -217,6 +217,7 @@ export class TravelAgentService {
     private readonly sessions: Pick<FileAgentSessionRepository, "get" | "save"> = new FileAgentSessionRepository(),
     private readonly trips: Pick<FileTripRepository, "get" | "save"> = new FileTripRepository(),
     private readonly piRunner: PiConversationRunner | null = createPiConversationRunner(),
+    private readonly tripGenerator: typeof generateTrip = generateTrip,
   ) {}
 
   async createSession(tripId?: string) {
@@ -275,7 +276,7 @@ export class TravelAgentService {
   /** 详细规划并落库：单方案 TripBundle → stage editing → emit trip/session */
   private async generateIntoSession(session: AgentSession, emit: (event: AgentEvent) => void) {
     emit({ type: "progress", message: "正在核对地点与路线" });
-    let bundle = await generateTrip(toRequest(session.brief));
+    let bundle = await this.tripGenerator(toRequest(session.brief));
     bundle = { ...bundle, agentSessionId: session.id };
     await this.trips.save(bundle);
     const plan = bundle.plans.find((item) => item.id === bundle.selectedPlanId) ?? bundle.plans[0];
@@ -302,7 +303,7 @@ export class TravelAgentService {
     const bundle = session.tripId ? await this.trips.get(session.tripId) : null;
     const outcome = await this.piRunner.run(session, userText, bundle, {
       generateOutline: (request, previous, feedback) => this.draftOutline(request, previous, feedback),
-      generateTrip,
+      generateTrip: this.tripGenerator,
       previewChange: (target, operations) => this.previewChange(target, operations),
       onProgress: (text) => emit({ type: "progress", message: text }),
     });
@@ -475,10 +476,51 @@ export class TravelAgentService {
 
     if (input.type === "generate") {
       if (session.stage === "collecting") throw new Error("请先补齐目的地和旅行天数");
-      if (session.stage !== "drafting") throw new Error("请先出初步方案，确认草案后再详细规划");
-      if (!session.outline) throw new Error("还没有草案，请先生成初步方案");
-      session = await this.sessions.save({ ...session, stage: "generating", messages: [...session.messages, message("assistant", "开始详细规划。我会核对地点、路线和每天的驾驶强度。", "status")], updatedAt: new Date().toISOString() });
-      return await this.generateIntoSession(session, emit);
+
+      // 重复点击或网络重试发生在方案已生成之后时，直接返回现有结果，避免误报“请先出初步方案”。
+      if (session.stage === "editing" && session.tripId) {
+        const existingTrip = await this.trips.get(session.tripId);
+        if (existingTrip) {
+          emit({ type: "trip", trip: existingTrip });
+          emit({ type: "session", session });
+          return { session, trip: existingTrip };
+        }
+      }
+
+      if (!session.outline) {
+        if (session.stage === "drafting" || session.stage === "generating") throw new Error("还没有草案，请先生成初步方案");
+        throw new Error("请先出初步方案，确认草案后再详细规划");
+      }
+      if (session.stage !== "drafting" && session.stage !== "generating" && session.stage !== "ready") {
+        throw new Error("请先出初步方案，确认草案后再详细规划");
+      }
+
+      // generating 可能是上一次生成中途失败留下的状态；清掉未完成提示并从草案重新开始。
+      const lastMessage = session.messages.at(-1);
+      const messages = session.stage === "generating"
+        && lastMessage?.kind === "status"
+        && lastMessage.content.startsWith("开始详细规划")
+        ? session.messages.slice(0, -1)
+        : session.messages;
+      const retryableSession: AgentSession = { ...session, stage: "drafting", messages, updatedAt: new Date().toISOString() };
+
+      try {
+        session = await this.sessions.save({
+          ...retryableSession,
+          stage: "generating",
+          messages: [...retryableSession.messages, message("assistant", "开始详细规划。我会核对地点、路线和每天的驾驶强度。", "status")],
+          updatedAt: new Date().toISOString(),
+        });
+        return await this.generateIntoSession(session, emit);
+      } catch (error) {
+        // 外部模型、地图或存储暂时失败时恢复到 drafting，使用户可以直接重试。
+        try {
+          await this.sessions.save({ ...retryableSession, updatedAt: new Date().toISOString() });
+        } catch {
+          // 保留原始生成错误；持久化层错误由下一次读取/重试处理。
+        }
+        throw error;
+      }
     }
 
     if (!session.tripId) throw new Error("当前还没有生成行程");

@@ -63,6 +63,7 @@ function AgentPanel({ session, bundle, working, onTurn, onNewTrip, onTripsOpen, 
   useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [session?.messages.length, working]);
   const selectedPlan = bundle?.plans.find((item) => item.id === bundle.selectedPlanId);
   const revisions = bundle?.revisions.filter((revision) => revision.planId === selectedPlan?.id).slice(-4).reverse() ?? [];
+  const visibleMessages = session?.messages.filter((item) => item.kind !== "system") ?? [];
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -80,6 +81,13 @@ function AgentPanel({ session, bundle, working, onTurn, onNewTrip, onTripsOpen, 
     setInput(reply);
   };
 
+  const isReplyAvailable = (reply: string) => {
+    if (reply === "出个初步方案" || reply === "开始规划") return session?.stage === "ready";
+    if (reply === "确认并详细规划" || reply === "再调整调整") return session?.stage === "drafting" && Boolean(session.outline);
+    if (reply === "确认修改" || reply === "取消") return Boolean(session?.pendingChange);
+    return true;
+  };
+
   return <section className={`agent-panel ${mobileActive ? "mobile-active" : ""}`} aria-label="旅行 Agent 对话">
     <header className="agent-header">
       <button className="agent-mark" onClick={onNewTrip} aria-label="开始新行程"><Route /></button>
@@ -87,20 +95,24 @@ function AgentPanel({ session, bundle, working, onTurn, onNewTrip, onTripsOpen, 
       <button className="my-trips-button" onClick={onTripsOpen} aria-label="我的行程"><BookOpenText /><span>我的行程</span></button>
     </header>    <div className="agent-messages" ref={listRef}>
       {!session && <div className="agent-boot"><LoaderCircle className="spin" /><span>正在唤醒旅行 Agent</span></div>}
-      {session?.messages.filter((item) => item.kind !== "system").map((item, index) => <article key={item.id} className={`agent-message ${item.role} ${item.kind}`}>
+      {visibleMessages.map((item, index) => {
+        const isLatest = index === visibleMessages.length - 1;
+        const quickReplies = isLatest ? item.quickReplies.filter(isReplyAvailable) : [];
+        return <article key={item.id} className={`agent-message ${item.role} ${item.kind}`}>
         {item.role === "assistant" && <span className="message-avatar"><Bot /></span>}
         <div className={`message-bubble ${item.kind === "outline" ? "outline-bubble" : ""}`}>
           <p className={item.kind === "outline" ? "outline-text" : ""}>{item.content}</p>
-          {item.kind === "outline" && session.outline && index === session.messages.length - 1 && <div className="outline-days">
+          {item.kind === "outline" && session?.outline && isLatest && <div className="outline-days">
             {session.outline.days.map((day) => <div key={day.day} className="outline-day">
               <span className="outline-day-num">D{day.day}</span>
               <div><strong>{day.title}</strong><p>{day.places.join(" → ") || "灵活安排"}</p><small><BedDouble />{day.stay}</small></div>
             </div>)}
             {session.outline.highlights.length > 0 && <div className="outline-highlights">{session.outline.highlights.map((item2) => <span key={item2}>{item2}</span>)}</div>}
           </div>}
-          {item.quickReplies.length > 0 && <div className="quick-replies">{item.quickReplies.map((reply) => <button key={reply} disabled={Boolean(working)} onClick={() => handleReply(reply)}>{reply}<ChevronRight /></button>)}</div>}
+          {quickReplies.length > 0 && <div className="quick-replies">{quickReplies.map((reply) => <button key={reply} disabled={Boolean(working)} onClick={() => handleReply(reply)}>{reply}<ChevronRight /></button>)}</div>}
         </div>
-      </article>)}
+      </article>;
+      })}
       {session?.pendingChange && <section className="change-preview-card">
         <small>待确认修改</small><strong>{session.pendingChange.summary}</strong>
         <div><span>影响第 {session.pendingChange.affectedDays.join("、")} 天</span><span>{formatDistance(session.pendingChange.before.distanceM)} → {formatDistance(session.pendingChange.after.distanceM)}</span></div>

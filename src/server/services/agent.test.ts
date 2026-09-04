@@ -217,6 +217,47 @@ describe("TravelAgentService", () => {
     expect(session.outline).toBeDefined();
   });
 
+  it("详细规划失败后回退到草案，并允许重试和重复确认", async () => {
+    const sessions = new MemorySessions();
+    const trips = new MemoryTrips();
+    const createdAt = "2026-08-07T00:00:00.000Z";
+    const generated: TripBundle = {
+      schemaVersion: 2,
+      id: "trip_retry",
+      request: { destination: "川西", days: 5, adults: 2, children: 0, childAges: [], seniors: 0, pace: "balanced", interests: [], mustGo: [], avoid: [], earliestDeparture: "09:00", latestArrival: "19:30", maxDriveHours: 5, notes: "" },
+      plans: [{ id: "plan_retry", name: "经典", tagline: "少折返", accent: "vermillion", version: 1, createdAt, days: [] }],
+      selectedPlanId: "plan_retry",
+      sourceMode: "demo",
+      revisions: [],
+      createdAt,
+      updatedAt: createdAt,
+    };
+    let attempts = 0;
+    const generator = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("地图服务暂时不可用");
+      return generated;
+    };
+    const service = new TravelAgentService(sessions, trips, fakeRunner(null), generator);
+    let session = await service.createSession();
+    ({ session } = await service.handleTurn(session.id, { type: "message", message: "去川西玩5天，必去折多山，喜欢摄影，避开人造景区" }));
+    ({ session } = await service.handleTurn(session.id, { type: "create_outline" }));
+
+    await expect(service.handleTurn(session.id, { type: "generate" })).rejects.toThrow("地图服务暂时不可用");
+    const retryable = await sessions.get(session.id);
+    expect(retryable?.stage).toBe("drafting");
+    expect(retryable?.messages.at(-1)?.kind).toBe("outline");
+
+    ({ session } = await service.handleTurn(session.id, { type: "generate" }));
+    expect(session.stage).toBe("editing");
+    expect(session.tripId).toBe(generated.id);
+
+    const repeated = await service.handleTurn(session.id, { type: "generate" });
+    expect(repeated.session.stage).toBe("editing");
+    expect("trip" in repeated ? repeated.trip.id : undefined).toBe(generated.id);
+    expect(attempts).toBe(2);
+  });
+
   it("旧版 comparing 会话收到消息时自动迁移为 editing", async () => {
     const sessions = new MemorySessions();
     const trips = new MemoryTrips();
