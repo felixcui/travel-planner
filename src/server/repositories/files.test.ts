@@ -31,6 +31,9 @@ function bundle(id: string, updatedAt: string): TripBundle {
 afterEach(async () => {
   if (testDir) await rm(testDir, { recursive: true, force: true });
   delete process.env.DATA_DIR;
+  delete process.env.VERCEL;
+  delete process.env.BLOB_STORE_ID;
+  vi.doUnmock("@vercel/blob");
   vi.resetModules();
 });
 
@@ -79,5 +82,56 @@ describe("FileTripRepository", () => {
     expect(shared?.plans).toHaveLength(1);
     expect(shared?.agentSessionId).toBeUndefined();
     expect(shared?.revisions).toEqual([]);
+  });
+});
+
+describe("Vercel Blob repositories", () => {
+  it("通过私有 Blob 在不同 Repository 实例间保存和恢复会话", async () => {
+    const objects = new Map<string, string>();
+    const put = vi.fn(async (pathname: string, body: string, options: { access: string; allowOverwrite: boolean }) => {
+      expect(options).toMatchObject({ access: "private", allowOverwrite: true });
+      objects.set(pathname, body);
+      return { pathname };
+    });
+    const get = vi.fn(async (pathname: string, options: { access: string; useCache: boolean }) => {
+      expect(options).toEqual({ access: "private", useCache: false });
+      const body = objects.get(pathname);
+      return body === undefined ? null : { statusCode: 200, stream: new Response(body).body };
+    });
+    const list = vi.fn(async ({ prefix }: { prefix: string }) => ({
+      blobs: [...objects.keys()].filter((pathname) => pathname.startsWith(prefix)).map((pathname) => ({ pathname })),
+      hasMore: false,
+    }));
+    vi.doMock("@vercel/blob", () => ({ get, list, put }));
+    process.env.VERCEL = "1";
+    process.env.BLOB_STORE_ID = "store_test";
+    vi.resetModules();
+
+    const { FileAgentSessionRepository } = await import("./files");
+    const session = {
+      schemaVersion: 1 as const,
+      id: "session_cross_instance",
+      stage: "collecting" as const,
+      brief: { confirmedFields: [] },
+      interviewQueue: ["mustGo"],
+      messages: [],
+      createdAt: "2026-09-04T00:00:00.000Z",
+      updatedAt: "2026-09-04T00:00:00.000Z",
+    };
+    const saved = await new FileAgentSessionRepository().save(session);
+    const restored = await new FileAgentSessionRepository().get(session.id);
+
+    expect(restored).toEqual(saved);
+    expect(objects.has("travel-planner/agent-sessions/session_cross_instance.json")).toBe(true);
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("在 Vercel 未连接 Blob 时返回明确配置错误", async () => {
+    process.env.VERCEL = "1";
+    vi.resetModules();
+    const { FileTripRepository } = await import("./files");
+    await expect(new FileTripRepository().get("missing")).rejects.toThrow("Vercel Blob 未连接");
   });
 });

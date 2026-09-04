@@ -20,12 +20,14 @@ npm run dev
 
 未配置或外部服务不可用时，应用会返回明确标记的演示/估算结果，不把降级数据伪装成实时精确信息。
 
+部署到 Vercel 时，还需在项目的 Storage 页面创建并连接一个 **Private Vercel Blob**。Vercel Functions 使用 Blob 持久化会话、行程、景点和分享数据；本地开发与测试仍使用 `data/` 下的 JSON 文件。
+
 ## 架构边界
 
 - `SearchProvider`：一期 Tavily，未来可新增其他搜索实现。
 - `LlmProvider`：一期 GLM-5.2。
 - `MapProvider`：一期 Nominatim、OSM、OSRM。
-- Repository：生成成功的行程及后续修改保存为服务端 JSON 文件，浏览器同时使用 IndexedDB 保存最后草稿。
+- Repository：本地使用服务端 JSON 文件；Vercel 环境使用 Private Vercel Blob，避免 Serverless 实例间 `/tmp` 不共享导致数据丢失。浏览器同时使用 IndexedDB 保存最后草稿。
 - Agent：匿名会话保存在 `data/agent-sessions/`；行程与对话分离，分享快照不会包含对话或版本历史。
 - 当前新疆地图保留在 `/Users/felixcui/Documents/tmp/xinjiang-roadtrip-map/index.html`，只作为交互与回归参考，不与产品代码耦合。
 
