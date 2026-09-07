@@ -38,6 +38,32 @@ afterEach(async () => {
 });
 
 describe("FileTripRepository", () => {
+  it("不同匿名访问者不能列出、读取、覆盖或认领他人及旧版行程", async () => {
+    testDir = await mkdtemp(join(tmpdir(), "travel-planner-owners-"));
+    process.env.DATA_DIR = testDir;
+    vi.resetModules();
+    const { FileTripRepository, FileAgentSessionRepository } = await import("./files");
+    const a = new FileTripRepository("owner-a");
+    const b = new FileTripRepository("owner-b");
+    const anonymous = new FileTripRepository("");
+    const saved = await a.save({ ...bundle("trip_owned", "2026-08-01T08:00:00.000Z"), ownerId: "forged-owner" });
+    expect(saved.ownerId).toBe("owner-a");
+    await new FileTripRepository().save(bundle("trip_legacy", saved.updatedAt));
+    expect((await a.list()).map((value) => value.id)).toEqual([saved.id]);
+    expect(await b.list()).toEqual([]);
+    expect(await anonymous.list()).toEqual([]);
+    expect(await b.get(saved.id)).toBeNull();
+    expect(await a.get("trip_legacy")).toBeNull();
+    expect(await a.get("../trip_owned")).toBeNull();
+    await expect(b.save(saved)).rejects.toThrow("无权访问");
+    await expect(a.save(bundle("trip_legacy", saved.updatedAt))).rejects.toThrow("无权访问");
+    const sessionsA = new FileAgentSessionRepository("owner-a");
+    const sessionsB = new FileAgentSessionRepository("owner-b");
+    const session = await sessionsA.save({ schemaVersion: 1, id: "session_owned", stage: "collecting", brief: { confirmedFields: [] }, interviewQueue: [], messages: [], createdAt: saved.createdAt, updatedAt: saved.updatedAt });
+    expect(await sessionsB.get(session.id)).toBeNull();
+    await expect(sessionsB.save(session)).rejects.toThrow("无权访问");
+    expect((await sessionsA.get(session.id))?.ownerId).toBe("owner-a");
+  });
   it("保存、读取并按更新时间倒序列出行程", { timeout: 10000 }, async () => {
     testDir = await mkdtemp(join(tmpdir(), "travel-planner-trips-"));
     process.env.DATA_DIR = testDir;
@@ -76,12 +102,18 @@ describe("FileTripRepository", () => {
     const repository = new FileShareRepository();
     const value = bundle("trip_private", "2026-08-01T08:00:00.000Z");
     value.agentSessionId = "session_private";
+    value.ownerId = "owner-private";
+    value.request.notes = "私人备注";
+    value.request.childAges = [8];
     value.revisions = [{ id: "rev_1", planId: value.plans[0].id, version: 1, source: "generated", summary: "初始", createdAt: value.createdAt, snapshot: value.plans[0] }];
     await repository.save("secret-token", value);
     const shared = await repository.get("secret-token");
     expect(shared?.plans).toHaveLength(1);
     expect(shared?.agentSessionId).toBeUndefined();
     expect(shared?.revisions).toEqual([]);
+    expect(shared?.ownerId).toBeUndefined();
+    expect(shared?.request.notes).toBe("");
+    expect(shared?.request.childAges).toEqual([]);
   });
 });
 

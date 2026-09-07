@@ -8,6 +8,7 @@ import { del, get, set } from "idb-keyval";
 import { ArrowDown, ArrowRight, ArrowUp, BedDouble, BookOpenText, Bot, CalendarDays, CarFront, Check, ChevronRight, CircleAlert, Clock3, Download, ExternalLink, GripVertical, History, LoaderCircle, Map, MapPinned, MessageCircle, Plus, RefreshCw, Route, Send, Share2, Sparkles, Trash2, UsersRound, X } from "lucide-react";
 import type { Activity, AgentEvent, AgentSession, DayPlan, Place, Plan, TripBundle, TripSummary } from "@/lib/domain";
 import { formatDistance, formatDuration, formatHours, id, summarizePlan } from "@/lib/utils";
+import { isConcretePlace, routeSafety } from "@/lib/route-safety";
 
 const TripMap = dynamic(() => import("./trip-map"), { ssr: false, loading: () => <div className="map-loading"><LoaderCircle className="spin" /> 正在展开地图…</div> });
 const DRAFT_KEY = "travel-planner:last-draft";
@@ -197,7 +198,7 @@ function BriefCanvas({ session, working, onTurn }: { session: AgentSession | nul
     <div className="brief-title"><Sparkles /><div><small>当前旅行需求</small><strong>{brief?.destination || "等待目的地"}</strong></div><span className={ready || drafting ? "ready" : "collecting"}>{drafting ? "草案打磨中" : ready ? "可以出方案" : "沟通中"}</span></div>
     <div className="brief-grid">
       <div><small>目的地</small><strong>{brief?.destination || "待补充"}</strong></div>
-      <div><small>路线</small><strong>{brief?.startPoint || brief?.endPoint ? `${brief.startPoint ?? "灵活"} → ${brief.endPoint ?? "灵活"}` : "待沟通"}</strong></div>
+      <div><small>路线（详细规划前必填）</small><strong>{brief?.startPoint || "请补充出发地点"} → {brief?.endPoint || "请补充结束地点"}</strong></div>
       <div><small>游玩天数</small><strong>{brief?.days ? `${brief.days} 天` : "待补充"}</strong></div>
       <div><small>同行人员</small><strong>{brief ? `${brief.adults ?? 2} 成人${brief.children ? ` · ${brief.children} 儿童` : ""}${brief.seniors ? ` · ${brief.seniors} 老人` : ""}` : "待沟通"}</strong></div>
       <div><small>旅行节奏</small><strong>{brief?.pace ? paceLabels[brief.pace] : "适中"}</strong></div>
@@ -263,8 +264,13 @@ export default function PlannerApp({ initialBundle, initialMessage, readOnly = f
           return;
         }
       }
-      const tripId = initialBundle?.id ?? localDraft?.id;
-      const response = await fetch("/api/agent/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tripId }) });
+      let tripId = initialBundle?.id ?? localDraft?.id;
+      let response = await fetch("/api/agent/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tripId }) });
+      if (response.status === 404 && !initialBundle) {
+        tripId = undefined;
+        setNotice("旧行程已保留，但当前浏览器没有访问权限。已为你开启新的私人会话。");
+        response = await fetch("/api/agent/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      }
       if (!response.ok) throw new Error("无法创建对话");
       const created = await response.json() as AgentSession;
       setSession(created);
@@ -313,16 +319,26 @@ export default function PlannerApp({ initialBundle, initialMessage, readOnly = f
   const selectedActivity = selectedDay?.activities.find((activity) => activity.place.id === selectedPlaceId);
   // 结构判断：segments 含“出发段”（首段为“当日出发地 → 第一景点”）时，segments 数 ≥ place 活动数
   // （闭环结构再含末段“最后景点 → 住宿地”，segments 数 = place 活动数 + 1）；旧数据无出发段。
-  const hasOriginSegment = !!selectedDay && selectedDay.segments.length >= selectedDay.activities.filter((item) => item.type === "place").length;
+  const firstPlaceId = selectedDay?.activities.find((item) => item.type === "place")?.place.id;
+  const hasOriginSegment = Boolean(firstPlaceId && selectedDay?.segments[0]?.toPlaceId === firstPlaceId && selectedDay?.segments[0]?.fromPlaceId !== firstPlaceId);
   const stats = plan ? summarizePlan(plan) : null;
+  const safety = plan && bundle ? routeSafety(plan, bundle.request, selectedDayId) : null;
 
   async function turn(input: TurnInput, sessionOverride?: AgentSession) {
     const activeSession = sessionOverride ?? session;
     if (!activeSession || working) return;
+    if (input.type === "generate" && (!isConcretePlace(activeSession.brief.startPoint) || !isConcretePlace(activeSession.brief.endPoint))) {
+      setNotice("请先在对话中补充具体起终点，例如：从成都出发，最后回到成都。不能用“回家”代替结束地点。");
+      return;
+    }
     setNotice("");
-    setWorking(input.type === "generate" ? "正在生成两套路线" : "Agent 正在思考");
+    setWorking(input.type === "generate" ? "正在计算路线与检查旅行约束" : "Agent 正在思考");
     try {
       const response = await fetch(`/api/agent/sessions/${activeSession.id}/turns`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({}));
+        throw new Error(failure.error || "无法访问此对话，请从首页新建行程");
+      }
       await readEvents(response, (event) => {
         if (event.type === "progress" || event.type === "ack") setWorking(event.message);
         if (event.type === "session") setSession(event.session);
@@ -391,6 +407,7 @@ export default function PlannerApp({ initialBundle, initialMessage, readOnly = f
     } catch (error) { setNotice(error instanceof Error ? error.message : "添加失败"); } finally { setWorking(""); }
   }
   async function share() {
+    if (manualDirty) { setNotice("请先重新计算并保存修改，再分享行程"); return; }
     setWorking("正在创建只读快照");
     try { const response = await fetch("/api/shares", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bundle) }); const data = await response.json(); if (!response.ok) throw new Error(data.error); await navigator.clipboard.writeText(`${location.origin}${data.url}`); setNotice("只读分享链接已复制"); } catch (error) { setNotice(error instanceof Error ? error.message : "分享失败"); } finally { setWorking(""); }
   }
@@ -418,7 +435,7 @@ export default function PlannerApp({ initialBundle, initialMessage, readOnly = f
       </header>
 
       <aside className="route-alert-card">
-        <span><CircleAlert /></span><div><small>沿途提示</small><strong>{selectedDayId ? selectedDay?.issues[0]?.message || `${selectedDay?.title}路线已校验，可按当前节奏出发。` : "全程路线已校验，可按当前节奏出发。"}</strong></div>
+        <span><CircleAlert /></span><div><small>{safety?.blocked ? "需要调整，尚未满足旅行约束" : "路线核对提示"}</small><strong>{manualDirty ? "修改尚未重算，当前里程与时间为旧结果。" : safety?.message}</strong>{safety?.blocked && <p>请减少景点或调整住宿后重新计算；驾驶仍超限时，请增加天数或缩小行程范围。</p>}</div>
       </aside>
 
       <section className="day-dock" aria-label="每日路书">

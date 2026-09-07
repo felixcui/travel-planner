@@ -4,6 +4,7 @@ import type { TripBundle } from "@/lib/domain";
 const { generateTrip, saveTrip } = vi.hoisted(() => ({ generateTrip: vi.fn(), saveTrip: vi.fn() }));
 vi.mock("@/server/services/planning", () => ({ generateTrip }));
 vi.mock("@/server/repositories/files", () => ({ FileTripRepository: class { save = saveTrip; } }));
+vi.mock("@/server/visitor", () => ({ visitorRepositories: async () => ({ trips: { save: saveTrip } }) }));
 
 import { POST } from "./route";
 

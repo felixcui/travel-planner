@@ -1,13 +1,12 @@
 import type { Activity, DayPlan, Place, Plan, TripBundle, TripRequest } from "@/lib/domain";
 import { TripBundleSchema, TripRequestSchema } from "@/lib/domain";
 import { applyDayRules } from "@/lib/rules";
+import { isConcretePlace, requireEndpoints, routeSafety } from "@/lib/route-safety";
 import { clockToMinutes, haversine, id } from "@/lib/utils";
 import { FilePlaceRepository } from "../repositories/files";
 import { createLlmProvider, createPlanningAdvisor, type PlanDraft, type PlanningAdvisor } from "../providers/llm";
 import { geocodeOrEstimate, OsmMapProvider } from "../providers/map";
 import { enrichKnowledge } from "./enrichment";
-
-const DEFAULT_CENTER = { lat: 35.8617, lng: 104.1954 };
 
 function fallbackDraft(request: TripRequest): PlanDraft {
   const must = request.mustGo.length ? request.mustGo : [
@@ -57,20 +56,23 @@ async function resolvePlaces(names: string[], request: TripRequest) {
   const repository = new FilePlaceRepository();
   const map = new OsmMapProvider();
   const destination = await map.geocodeDestination(request.destination);
-  const center = destination?.location ?? DEFAULT_CENTER;
+  if (!destination) throw new Error("无法确认目的地区域，请补充省份及城市名称后重试");
+  const center = destination.location;
   const unique = [...new Set(names)];
   const places: Place[] = [];
 
   for (let index = 0; index < unique.length; index++) {
     const name = unique[index];
+    if (!isConcretePlace(name)) throw new Error(`“${name}”不是明确地点，请提供具体景点或城市名称`);
     const existing = await repository.findByName(name);
     const regionLimit = request.destination.length <= 3 ? 1_500_000 : 450_000;
     const distanceFromCenter = existing ? haversine(existing.location, center) : Number.POSITIVE_INFINITY;
-    if (existing && Date.parse(existing.knowledge.expiresAt) > Date.now() && distanceFromCenter <= regionLimit && (existing.name === request.destination || distanceFromCenter > 2_000)) {
+    if (existing && existing.locationStatus === "verified" && existing.address.includes(name) && Date.parse(existing.knowledge.expiresAt) > Date.now() && distanceFromCenter <= regionLimit && (existing.name === request.destination || distanceFromCenter > 2_000)) {
       places.push(existing);
       continue;
     }
     const geocoded = await geocodeOrEstimate(map, name, request.destination, center, index);
+    if (!geocoded.verified) throw new Error(`无法确认“${name}”的位置，请补充所在城市或更换具体地点后重试；本次未生成估算坐标路线。`);
     const knowledge = existing?.knowledge ?? await enrichKnowledge(name);
     const place: Place = {
       id: existing?.id ?? id("place"),
@@ -96,23 +98,26 @@ function stripParenthetical(name: string) {
 /**
  * 解析“出发点/住宿地”地名（首日出发地 = startPoint/destination；之后 = 前一日 stay；当日住宿地 = 当日 stay）为 Place。
  * 优先在已解析景点与已有入库 Place 中匹配（精确 / 剥括号 / 别名），失败才走 geocode 兜底并入库。
- * 返回 null 表示解析失败，调用方应跳过该段（保守不引入坏坐标）。
+ * 解析失败时明确中断，不能静默跳过出发或入住路段。
  */
 async function resolveOriginPlace(name: string, request: TripRequest, knownPlaces: Iterable<Place>): Promise<Place | null> {
-  if (!name) return null;
+  if (!isConcretePlace(name)) throw new Error(`“${name || "未填写"}”不是明确的出发、住宿或结束地点，请补充城市或酒店名`);
   const base = stripParenthetical(name);
   const repository = new FilePlaceRepository();
   for (const candidate of [name, base]) {
     for (const place of knownPlaces) {
-      if (place.name === candidate || place.aliases.includes(candidate)) return place;
+      if (place.locationStatus === "verified" && (place.name === candidate || place.aliases.includes(candidate))) return place;
     }
     const existing = await repository.findByName(candidate);
-    if (existing) return existing;
+    if (existing?.locationStatus === "verified" && existing.address.includes(candidate)) return existing;
   }
   try {
     const map = new OsmMapProvider();
-    const center = (await map.geocodeDestination(request.destination))?.location ?? DEFAULT_CENTER;
+    const destination = await map.geocodeDestination(request.destination);
+    if (!destination) throw new Error("目的地区域尚未确认");
+    const center = destination.location;
     const geocoded = await geocodeOrEstimate(map, base, request.destination, center, 0);
+    if (!geocoded.verified) throw new Error("地点位置未确认");
     const place: Place = {
       id: id("place"), name: base, aliases: [], address: geocoded.address,
       category: "住宿", location: geocoded.location,
@@ -125,7 +130,7 @@ async function resolveOriginPlace(name: string, request: TripRequest, knownPlace
     };
     return await repository.save(place);
   } catch {
-    return null;
+    throw new Error(`无法确认“${name}”的位置，请补充完整城市、酒店或车站名称后重试`);
   }
 }
 
@@ -155,7 +160,7 @@ export async function resolvePlace(name: string, request: TripRequest) {
 
 async function buildPlan(draft: PlanDraft["plans"][number], places: Map<string, Place>, request: TripRequest, advisor: PlanningAdvisor | null): Promise<Plan> {
   const map = new OsmMapProvider();
-  const dayDrafts = draft.days.slice(0, request.days);
+  const dayDrafts = draft.days.slice(0, request.days).map((day, index) => index === request.days - 1 ? { ...day, stay: request.endPoint!, stayReason: "行程在已确认的结束地点收尾" } : day);
 
   // LLM 时长分配（每套方案一次批量调用；失败回退到景点库建议时长）。
   const durationMap = new Map<number, Map<string, number>>();
@@ -250,7 +255,7 @@ async function buildPlan(draft: PlanDraft["plans"][number], places: Map<string, 
       evaluatedDays = days.map((day) => {
         const evaluation = evaluations.get(day.day);
         if (!evaluation) return day;
-        const hardViolation = day.issues.some((issue) => issue.code === "drive_limit" || issue.code === "late_arrival");
+        const hardViolation = day.issues.some((issue) => issue.level === "error" || issue.code === "late_arrival");
         if (hardViolation) return day; // 硬校验保险丝：代码结论优先。
         return {
           ...day,
@@ -271,6 +276,7 @@ async function buildPlan(draft: PlanDraft["plans"][number], places: Map<string, 
 
 export async function generateTrip(input: unknown): Promise<TripBundle> {
   const request = TripRequestSchema.parse(input);
+  requireEndpoints(request);
   const llm = createLlmProvider();
   let draft = fallbackDraft(request);
   let llmLive = false;
@@ -279,13 +285,20 @@ export async function generateTrip(input: unknown): Promise<TripBundle> {
       draft = await llm.generatePlans(request);
       llmLive = true;
     } catch {
-      // Coding Plan 不可用时返回明确标记的降级方案。
+      // 保留失败状态，下方明确报错，不发布占位景点路线。
     }
   }
+  if (!llmLive) throw new Error("详细规划服务暂时不可用，请稍后重试；不会用占位景点生成正式路线。草案可继续保留和调整。");
   const allNames = draft.plans.flatMap((plan) => plan.days.flatMap((day) => day.places));
   const places = await resolvePlaces(allNames, request);
   const advisor = createPlanningAdvisor();
   const plans = await mapLimit(draft.plans.slice(0, 1), 1, (plan) => buildPlan(plan, places, request, advisor));
+  for (const plan of plans) {
+    if (routeSafety(plan, request).blocked) {
+      plan.name = `${request.destination} · 待调整方案`;
+      plan.tagline = "存在未满足的旅行约束，请调整后再确定行程";
+    }
+  }
   const now = new Date().toISOString();
   return TripBundleSchema.parse({
     schemaVersion: 2,
@@ -304,8 +317,9 @@ export async function generateTrip(input: unknown): Promise<TripBundle> {
 
 export async function recalculatePlan(requestInput: unknown, planInput: Plan, affectedDays?: number[]): Promise<Plan> {
   const request = TripRequestSchema.parse(requestInput);
+  requireEndpoints(request);
   const map = new OsmMapProvider();
-  const affected = affectedDays ? new Set(affectedDays) : null;
+  const affected = affectedDays ? new Set(affectedDays.flatMap((day) => [day, day + 1])) : null;
   const allPlaces = planInput.days.flatMap((day) => day.activities.filter((item) => item.type === "place").map((item) => item.place));
   const days = await mapLimit(planInput.days, 2, async (day, dayIndex) => {
     if (affected && !affected.has(day.day)) return day;

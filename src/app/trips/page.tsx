@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, BookOpenText, CalendarDays, CarFront, MapPinned, Plus, Route } from "lucide-react";
 import { formatDistance, formatHours } from "@/lib/utils";
-import { FileTripRepository } from "@/server/repositories/files";
+import { visitorRepositories } from "@/server/visitor";
 import { summarizeTrip } from "@/server/services/trips";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +13,8 @@ function formatDate(value: string) {
 }
 
 export default async function TripsPage() {
-  const bundles = await new FileTripRepository().list();
+  const { trips: repository } = await visitorRepositories();
+  const bundles = await repository.list();
   const trips = bundles.map(summarizeTrip);
   return <main className="archive-shell">
     <header className="archive-header">
@@ -22,7 +23,7 @@ export default async function TripsPage() {
     </header>
     <section className="archive-hero">
       <div><span className="archive-index">02</span><div><p>每一次出发都有迹可循</p><h1>已保存的<br /><em>旅行路书</em></h1></div></div>
-      <aside><strong>{trips.length}</strong><span>份行程档案</span><small>生成完成后自动保存，后续调整也会同步更新。</small></aside>
+      <aside><strong>{trips.length}</strong><span>份行程档案</span><small>仅当前浏览器可访问自己的行程。清除浏览器数据后将无法恢复访问；分享需主动创建只读链接。旧版未归属行程已保留，但不再公开展示。</small></aside>
     </section>
     {trips.length ? <section className="trip-archive-list">
       {trips.map((trip, index) => <Link className="trip-archive-card" href={`/trips/${trip.id}`} key={trip.id}>

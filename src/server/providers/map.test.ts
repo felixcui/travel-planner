@@ -11,8 +11,11 @@ describe("OsmMapProvider", () => {
     const from: Place = { id: "a", name: "A", aliases: [], address: "", category: "景点", location: { lat: 43, lng: 81 }, locationStatus: "estimated", knowledge };
     const to: Place = { ...from, id: "b", name: "B", location: { lat: 44, lng: 82 }, locationStatus: "verified" };
     const route = await provider.calculateRoute(from, to);
-    expect(route.status).toBe("estimated");
-    expect(route.provider).toBe("osrm-estimated-location");
+    expect(route.status).toBe("unavailable");
+    expect(route.provider).toBe("unverified-location");
+    expect(route.navigationUrl).toBeUndefined();
+    expect(route.geometry).toEqual([]);
+    expect(request).not.toHaveBeenCalled();
   });
 
   it("目的地编码对环线类目的地走人工核实区域中心（“新疆北疆大环线”→乌鲁木齐，不再经 Nominatim）", async () => {

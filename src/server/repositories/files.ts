@@ -117,36 +117,56 @@ export class FilePlaceRepository {
 }
 
 export class FileTripRepository {
+  constructor(private readonly ownerId?: string) {}
   async save(bundle: TripBundle) {
-    const validated = TripBundleSchema.parse(bundle);
+    if (!/^[a-zA-Z0-9_-]+$/.test(bundle.id)) throw new Error("无效行程标识");
+    if (this.ownerId !== undefined) {
+      if (!this.ownerId) throw new Error("请先创建旅行会话");
+      const previous = await loadJson<TripBundle>("trips", `${bundle.id}.json`);
+      if (previous && previous.ownerId !== this.ownerId) throw new Error("行程不存在或无权访问");
+    }
+    const validated = TripBundleSchema.parse(this.ownerId === undefined ? bundle : { ...bundle, ownerId: this.ownerId });
     await saveJson("trips", `${validated.id}.json`, validated);
     return validated;
   }
   async get(id: string) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) return null;
     const data = await loadJson<unknown>("trips", `${id}.json`);
     if (!data) return null;
-    try { return migrateTripBundle(data); } catch { return null; }
+    try {
+      const bundle = migrateTripBundle(data);
+      return this.ownerId === undefined || (Boolean(this.ownerId) && bundle.ownerId === this.ownerId) ? bundle : null;
+    } catch { return null; }
   }
   async list() {
     const bundles = await listJson<unknown>("trips");
     return bundles
       .map((bundle) => { try { return migrateTripBundle(bundle); } catch { return null; } })
       .filter((bundle): bundle is TripBundle => Boolean(bundle))
+      .filter((bundle) => this.ownerId === undefined || (Boolean(this.ownerId) && bundle.ownerId === this.ownerId))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 }
 
 export class FileAgentSessionRepository {
+  constructor(private readonly ownerId?: string) {}
   async save(session: AgentSession) {
-    const validated = AgentSessionSchema.parse(session);
+    if (!/^[a-zA-Z0-9_-]+$/.test(session.id)) throw new Error("无效会话标识");
+    if (this.ownerId !== undefined) {
+      if (!this.ownerId) throw new Error("请先创建旅行会话");
+      const previous = await loadJson<AgentSession>("agent-sessions", `${session.id}.json`);
+      if (previous && previous.ownerId !== this.ownerId) throw new Error("对话不存在或无权访问");
+    }
+    const validated = AgentSessionSchema.parse(this.ownerId === undefined ? session : { ...session, ownerId: this.ownerId });
     await saveJson("agent-sessions", `${validated.id}.json`, validated);
     return validated;
   }
 
   async get(id: string) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) return null;
     const data = await loadJson<unknown>("agent-sessions", `${id}.json`);
     const parsed = AgentSessionSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
+    return parsed.success && (this.ownerId === undefined || (Boolean(this.ownerId) && parsed.data.ownerId === this.ownerId)) ? parsed.data : null;
   }
 }
 
@@ -160,6 +180,8 @@ export class FileShareRepository {
       plans: [selected],
       selectedPlanId: selected.id,
       agentSessionId: undefined,
+      ownerId: undefined,
+      request: { ...validated.request, notes: "", childAges: [] },
       revisions: [],
     };
     await saveJson("shares", `${hash}.json`, { schemaVersion: 2, createdAt: new Date().toISOString(), bundle: shared });
@@ -167,7 +189,10 @@ export class FileShareRepository {
   async get(token: string) {
     const data = await loadJson<{ bundle?: unknown }>("shares", `${stableHash(token)}.json`);
     if (!data?.bundle) return null;
-    try { return migrateTripBundle(data.bundle); } catch { return null; }
+    try {
+      const bundle = migrateTripBundle(data.bundle);
+      return { ...bundle, ownerId: undefined, agentSessionId: undefined, revisions: [], request: { ...bundle.request, notes: "", childAges: [] } };
+    } catch { return null; }
   }
 }
 

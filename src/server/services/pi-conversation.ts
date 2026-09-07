@@ -161,6 +161,7 @@ function buildSystemPrompt(session: AgentSession, plan: Plan | null, userText: s
   lines.push(
     transcript(session.messages, userText),
     "工作规则：",
+    "- 详细规划前必须问清具体出发城市/地点与结束城市/地点，写入 startPoint/endPoint；‘回家’‘返程’不是地点，不得猜测用户住址。住宿字段只用真实城市、区域或酒店名。",
     "- 用户消息中出现新的或修正的旅行需求时，先调用 update_brief 写入（只传本次明确提到的字段，不要猜）。",
     "- 区分「出发地/返回地」与「目的地」：用户说“从X出发”“回到X”时分别写入 startPoint / endPoint，“去X玩”才是 destination，绝不能把出发地写成 destination。",
   );

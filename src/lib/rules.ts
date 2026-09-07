@@ -7,7 +7,8 @@ export function applyDayRules(day: DayPlan, request: TripRequest): DayPlan {
   // 闭环结构再追加末段“最后景点 → 当日住宿地”（segments 数 = 景点数 + 1）。
   // 到达第 i 个景点前：有出发段则累加 segments[i]，否则累加 segments[i-1]。
   const placeActivities = day.activities.filter((item) => item.type === "place");
-  const withOriginSegment = day.segments.length >= placeActivities.length;
+  const firstPlaceId = placeActivities[0]?.place.id;
+  const withOriginSegment = Boolean(firstPlaceId && day.segments[0]?.toPlaceId === firstPlaceId && day.segments[0]?.fromPlaceId !== firstPlaceId);
   let cursor = 0;
   let placeIndex = 0;
   const activities = day.activities.map((activity, index) => {
@@ -24,6 +25,12 @@ export function applyDayRules(day: DayPlan, request: TripRequest): DayPlan {
   });
 
   const issues: ValidationIssue[] = [];
+  // Include the final drive to accommodation/finish, not just arrival at the last attraction.
+  const consumedSegments = withOriginSegment ? placeActivities.length : Math.max(0, placeActivities.length - 1);
+  cursor += day.segments.slice(consumedSegments).reduce((sum, segment) => sum + segment.durationS / 60, 0);
+  if (day.activities.some((activity) => activity.place.locationStatus !== "verified") || day.segments.some((segment) => segment.status === "unavailable")) {
+    issues.push({ id: id("issue"), level: "error", code: "unverified_location", message: "地点位置或路段尚未确认，请补充具体地点后重新计算" });
+  }
   if (day.totalDriveS / 3600 > request.maxDriveHours) {
     issues.push({ id: id("issue"), level: "error", code: "drive_limit", message: `预计驾驶超过 ${request.maxDriveHours} 小时上限` });
   }
@@ -39,6 +46,6 @@ export function applyDayRules(day: DayPlan, request: TripRequest): DayPlan {
     ...day,
     activities,
     issues,
-    intensity: issues.some((item) => item.code === "drive_limit" || item.code === "late_arrival") ? "not_recommended" : deriveIntensity(day.totalDriveS, placeCount, request),
+    intensity: issues.some((item) => item.level === "error" || item.code === "late_arrival") ? "not_recommended" : deriveIntensity(day.totalDriveS, placeCount, request),
   };
 }

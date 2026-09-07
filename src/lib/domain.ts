@@ -153,6 +153,7 @@ export const LegacyTripBundleSchema = z.object({
 });
 
 export const TripBundleSchema = z.object({
+  ownerId: z.string().optional(),
   schemaVersion: z.literal(2),
   id: z.string(),
   request: TripRequestSchema,
@@ -249,6 +250,7 @@ export const PlanChangeSetSchema = z.object({
 export type PlanChangeSet = z.infer<typeof PlanChangeSetSchema>;
 
 export const AgentSessionSchema = z.object({
+  ownerId: z.string().optional(),
   schemaVersion: z.literal(1),
   id: z.string(),
   stage: z.enum(["collecting", "ready", "drafting", "generating", "comparing", "editing"]),

@@ -6,10 +6,17 @@ const handleTurn = vi.fn(async (_id: string, _input: unknown, emit: (event: unkn
 });
 
 vi.mock("@/server/services/agent", () => ({ TravelAgentService: class { handleTurn = handleTurn; } }));
+vi.mock("@/server/visitor", () => ({ visitorRepositories: async () => ({ agent: { handleTurn, getSession: async (id: string) => id === "session_1" ? { id } : null } }) }));
 
 import { POST } from "./route";
 
 describe("POST /api/agent/sessions/[id]/turns", () => {
+  it("没有归属权限时不启动 Agent", async () => {
+    handleTurn.mockClear();
+    const response = await POST(new Request("http://localhost", { method: "POST", body: "{}" }), { params: Promise.resolve({ id: "other_session" }) });
+    expect(response.status).toBe(404);
+    expect(handleTurn).not.toHaveBeenCalled();
+  });
   it("按 NDJSON 顺序输出 Agent 事件", async () => {
     const response = await POST(new Request("http://localhost/api/agent/sessions/session_1/turns", { method: "POST", body: JSON.stringify({ type: "message", message: "去川西" }) }), { params: Promise.resolve({ id: "session_1" }) });
     expect(response.headers.get("content-type")).toContain("application/x-ndjson");

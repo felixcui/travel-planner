@@ -254,3 +254,10 @@
 .day-legend{display:flex;flex-wrap:wrap;gap:3px;max-width:210px;background:rgba(255,253,245,.96);border:1px solid rgba(18,63,54,.14);border-radius:12px;padding:7px 9px;box-shadow:0 4px 14px rgba(40,52,44,.10);font-size:9px;font-weight:800;color:var(--ink-2);margin-top:10px;margin-right:10px}
 .day-legend-item{display:inline-flex;align-items:center;gap:4px;line-height:1}
 .day-legend-item i{width:9px;height:9px;border-radius:50%;display:inline-block;border:1px solid rgba(255,255,255,.5)}
+
+/* Route constraints must remain readable on both desktop and mobile. */
+.route-alert-card{align-items:flex-start;max-height:180px;overflow-y:auto}
+.route-alert-card strong{white-space:normal;overflow:visible;font-size:12px;line-height:1.5}
+.route-alert-card small{font-size:11px}
+.route-alert-card p{font-size:12px;line-height:1.5;margin:8px 0 0}
+@media(max-width:900px){.route-alert-card{display:flex;top:76px;bottom:auto;left:8px;width:calc(100% - 16px);max-height:140px;padding:10px;z-index:650}}

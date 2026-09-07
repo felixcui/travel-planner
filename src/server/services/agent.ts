@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AgentEvent, AgentMessage, AgentSession, Plan, PlanChangeOperation, PlanChangeSet, PlanOutline, TripBriefDraft, TripBundle, TripRequest } from "@/lib/domain";
 import { AgentSessionSchema, PlanChangeOperationSchema, TripRequestSchema } from "@/lib/domain";
 import { id, summarizePlan } from "@/lib/utils";
+import { routeSafety } from "@/lib/route-safety";
 import { FileAgentSessionRepository, FileTripRepository } from "../repositories/files";
 import { createLlmProvider } from "../providers/llm";
 import { briefDefaults, mergeBrief, missingFields, toRequest } from "./brief-utils";
@@ -282,7 +283,8 @@ export class TravelAgentService {
     const plan = bundle.plans.find((item) => item.id === bundle.selectedPlanId) ?? bundle.plans[0];
     const value = metrics(plan);
     const stays = new Set(plan.days.map((day) => day.stay)).size;
-    const assistant = message("assistant", `详细方案「${plan.name}」已生成：约 ${Math.round(value.distanceM / 1000)} 公里、${(value.driveS / 3600).toFixed(1)} 小时驾驶、${stays} 个住宿区域${value.tiringDays ? `，${value.tiringDays} 天强度偏高（可在对话里让我调整）` : "，整体强度可控"}。右侧地图和每日路书已就绪，继续对话可以微调。`, "status");
+    const safety = routeSafety(plan, bundle.request);
+    const assistant = message("assistant", safety.blocked ? `路线计算已返回，但方案需要调整：${safety.problems.join("；")}。请减少景点、调整住宿或增加旅行天数，不要直接按当前方案出发。` : `详细方案「${plan.name}」已计算：约 ${Math.round(value.distanceM / 1000)} 公里、${(value.driveS / 3600).toFixed(1)} 小时驾驶、${stays} 个住宿区域。${safety.message}`, "status");
     const saved = await this.sessions.save({ ...session, stage: "editing", tripId: bundle.id, messages: [...session.messages, assistant], updatedAt: new Date().toISOString() });
     emit({ type: "trip", trip: bundle });
     emit({ type: "session", session: saved });
@@ -316,7 +318,8 @@ export class TravelAgentService {
       trip = savedTrip;
       const plan = savedTrip.plans.find((item) => item.id === savedTrip.selectedPlanId) ?? savedTrip.plans[0];
       const value = metrics(plan);
-      content = `详细方案「${plan.name}」已生成：约 ${Math.round(value.distanceM / 1000)} 公里、${(value.driveS / 3600).toFixed(1)} 小时驾驶${value.tiringDays ? `，${value.tiringDays} 天强度偏高（可以让我调整）` : "，整体强度可控"}。右侧地图和每日路书已就绪。`;
+      const safety = routeSafety(plan, savedTrip.request);
+      content = safety.blocked ? `路线计算已返回，但方案需要调整：${safety.problems.join("；")}。请调整后再确定行程。` : `详细方案「${plan.name}」已计算：约 ${Math.round(value.distanceM / 1000)} 公里、${(value.driveS / 3600).toFixed(1)} 小时驾驶。${safety.message}`;
     } else if (outcome.outline) {
       content = content || `草案 v${outcome.outline.version}：${outcome.outline.summary}`;
     } else if (outcome.pendingChange) {

@@ -1,17 +1,19 @@
 import type { AgentEvent } from "@/lib/domain";
-import { TravelAgentService } from "@/server/services/agent";
+import { visitorRepositories } from "@/server/visitor";
 
 export const maxDuration = 300;
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  const { agent } = await visitorRepositories();
+  if (!await agent.getSession(id)) return Response.json({ error: "对话不存在或无权访问" }, { status: 404 });
   const input = await request.json().catch(() => ({}));
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       const send = (event: AgentEvent) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       try {
-        await new TravelAgentService().handleTurn(id, input, send);
+        await agent.handleTurn(id, input, send);
       } catch (error) {
         send({ type: "error", message: error instanceof Error ? error.message : "Agent 处理失败" });
       } finally {

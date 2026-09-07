@@ -147,6 +147,9 @@ export class OsmMapProvider implements MapProvider {
   }
 
   async calculateRoute(from: Place, to: Place): Promise<RouteSegment> {
+    if (from.locationStatus !== "verified" || to.locationStatus !== "verified") {
+      return { id: id("segment"), fromPlaceId: from.id, toPlaceId: to.id, fromName: from.name, toName: to.name, calculatedAt: new Date().toISOString(), distanceM: 0, durationS: 0, geometry: [], status: "unavailable", provider: "unverified-location" };
+    }
     const base = {
       id: id("segment"),
       fromPlaceId: from.id,
@@ -199,14 +202,14 @@ export async function geocodeOrEstimate(provider: MapProvider, name: string, reg
   const unique = [...new Set(candidates)];
   for (const candidate of unique) {
     const result = await provider.geocode(candidate, region, center);
-    if (result) return result;
+    if (result && bigramOverlap(candidate, result.address) >= 0.5 && distanceKm(result.location, center) <= 900) return result;
   }
   // viewbox 限死时兜底：全中国自由搜 + 多候选择优（limit=5 中取离目的地最近的）；
   // 结果必须离目的地中心足够近（大环线跨度可达数百公里，阈值取省域尺度 900km），
   // 避免“魔鬼城”这类通名命中全国任意同名点（如山东青岛的魔鬼城）
   for (const candidate of unique) {
     const fallback = await provider.geocode(candidate, "中国", center, { bounded: false, limit: 5, nearestTo: center });
-    if (fallback && distanceKm(fallback.location, center) <= 900) return fallback;
+    if (fallback && bigramOverlap(candidate, fallback.address) >= 0.5 && distanceKm(fallback.location, center) <= 900) return fallback;
   }
   const offset = deterministicOffset(`${region}:${name}`, index);
   return { location: { lat: center.lat + offset.lat, lng: center.lng + offset.lng }, address: `${region}（位置待核实）`, verified: false };
