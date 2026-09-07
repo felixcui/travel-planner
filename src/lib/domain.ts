@@ -154,6 +154,8 @@ export const LegacyTripBundleSchema = z.object({
 
 export const TripBundleSchema = z.object({
   ownerId: z.string().optional(),
+  confirmedOutline: z.lazy(() => PlanOutlineSchema).optional(),
+  sourceOutlineVersion: z.number().int().positive().optional(),
   schemaVersion: z.literal(2),
   id: z.string(),
   request: TripRequestSchema,

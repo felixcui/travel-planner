@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentEvent, AgentSession, TripBundle } from "@/lib/domain";
 import type { PiConversationRunner, PiTurnOutcome } from "./pi-conversation";
 import { extractTripBriefFallback, interpretPlanChangeFallback, TravelAgentService } from "./agent";
@@ -217,6 +217,21 @@ describe("TravelAgentService", () => {
     expect(session.outline).toBeDefined();
   });
 
+  it("否定确认或确认中夹带修改时，先更新草案而非生成旧路线", async () => {
+    for (const feedback of ["先不确认，第二天改成轻松一点", "确认，但第二天去掉一个景点"]) {
+      const sessions = new MemorySessions();
+      const generator = vi.fn();
+      const service = new TravelAgentService(sessions, new MemoryTrips(), fakeRunner(null), generator);
+      let session = await service.createSession();
+      ({ session } = await service.handleTurn(session.id, { type: "message", message: "去川西玩5天，必去折多山，喜欢摄影，避开人造景区" }));
+      ({ session } = await service.handleTurn(session.id, { type: "create_outline" }));
+      ({ session } = await service.handleTurn(session.id, { type: "message", message: feedback }));
+      expect(session.stage).toBe("drafting");
+      expect(session.outline?.version).toBe(2);
+      expect(generator).not.toHaveBeenCalled();
+    }
+  });
+
   it("详细规划失败后回退到草案，并允许重试和重复确认", async () => {
     const sessions = new MemorySessions();
     const trips = new MemoryTrips();
@@ -233,26 +248,33 @@ describe("TravelAgentService", () => {
       updatedAt: createdAt,
     };
     let attempts = 0;
-    const generator = async () => {
+    const generator = vi.fn(async () => {
       attempts += 1;
       if (attempts === 1) throw new Error("地图服务暂时不可用");
       return generated;
-    };
+    });
     const service = new TravelAgentService(sessions, trips, fakeRunner(null), generator);
     let session = await service.createSession();
     ({ session } = await service.handleTurn(session.id, { type: "message", message: "去川西玩5天，必去折多山，喜欢摄影，避开人造景区" }));
     ({ session } = await service.handleTurn(session.id, { type: "create_outline" }));
 
-    await expect(service.handleTurn(session.id, { type: "generate" })).rejects.toThrow("地图服务暂时不可用");
+    const outline = structuredClone(session.outline!);
+    const events: AgentEvent[] = [];
+    await expect(service.handleTurn(session.id, { type: "generate", outlineVersion: outline.version + 1 }, (event) => events.push(event))).rejects.toThrow("草案已更新");
+    expect(events.some((event) => event.type === "session")).toBe(true);
+    expect(generator).not.toHaveBeenCalled();
+    await expect(service.handleTurn(session.id, { type: "generate", outlineVersion: outline.version })).rejects.toThrow("地图服务暂时不可用");
+    expect(generator).toHaveBeenLastCalledWith(expect.any(Object), outline);
     const retryable = await sessions.get(session.id);
     expect(retryable?.stage).toBe("drafting");
     expect(retryable?.messages.at(-1)?.kind).toBe("outline");
 
-    ({ session } = await service.handleTurn(session.id, { type: "generate" }));
+    ({ session } = await service.handleTurn(session.id, { type: "message", message: "确认并详细规划" }));
+    expect(generator).toHaveBeenLastCalledWith(expect.any(Object), outline);
     expect(session.stage).toBe("editing");
     expect(session.tripId).toBe(generated.id);
 
-    const repeated = await service.handleTurn(session.id, { type: "generate" });
+    const repeated = await service.handleTurn(session.id, { type: "generate", outlineVersion: outline.version });
     expect(repeated.session.stage).toBe("editing");
     expect("trip" in repeated ? repeated.trip.id : undefined).toBe(generated.id);
     expect(attempts).toBe(2);

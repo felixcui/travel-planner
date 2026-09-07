@@ -181,6 +181,7 @@ export class FileShareRepository {
       selectedPlanId: selected.id,
       agentSessionId: undefined,
       ownerId: undefined,
+      confirmedOutline: undefined,
       request: { ...validated.request, notes: "", childAges: [] },
       revisions: [],
     };
@@ -191,7 +192,7 @@ export class FileShareRepository {
     if (!data?.bundle) return null;
     try {
       const bundle = migrateTripBundle(data.bundle);
-      return { ...bundle, ownerId: undefined, agentSessionId: undefined, revisions: [], request: { ...bundle.request, notes: "", childAges: [] } };
+      return { ...bundle, ownerId: undefined, confirmedOutline: undefined, agentSessionId: undefined, revisions: [], request: { ...bundle.request, notes: "", childAges: [] } };
     } catch { return null; }
   }
 }

@@ -334,7 +334,7 @@ export default function PlannerApp({ initialBundle, initialMessage, readOnly = f
     setNotice("");
     setWorking(input.type === "generate" ? "正在计算路线与检查旅行约束" : "Agent 正在思考");
     try {
-      const response = await fetch(`/api/agent/sessions/${activeSession.id}/turns`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+      const response = await fetch(`/api/agent/sessions/${activeSession.id}/turns`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input.type === "generate" ? { ...input, outlineVersion: activeSession.outline?.version } : input) });
       if (!response.ok) {
         const failure = await response.json().catch(() => ({}));
         throw new Error(failure.error || "无法访问此对话，请从首页新建行程");
@@ -428,7 +428,7 @@ export default function PlannerApp({ initialBundle, initialMessage, readOnly = f
 
       <header className="route-toolbar" aria-label="行程工具栏">
         <div className="route-heading"><button className="route-brand-mark" aria-label="开始新行程" onClick={newTrip}><Route /></button><div><small>{readOnly ? "SHARED ROADBOOK" : "YOUR ROADBOOK"}</small><strong>{bundle.request.destination} · {bundle.request.days} 日自驾</strong></div></div>
-        <div className="route-plan-tabs"><small>方案</small><span>{plan.name}</span><em>{plan.tagline}</em></div>
+        <div className="route-plan-tabs"><small>{bundle.sourceOutlineVersion ? `源自确认草案 v${bundle.sourceOutlineVersion}` : "方案"}</small><span>{plan.name}</span><em>{plan.tagline}</em></div>
         <div className="route-stats"><span><b>{formatDistance(stats.distanceM)}</b>总里程</span><span><b>{formatHours(stats.driveS)}</b>自驾</span><span><b>{plan.days.slice(1).filter((day, index) => day.stay !== plan.days[index]?.stay).length}</b>次换宿</span></div>
         <div className="route-actions">{!readOnly && <span className={`trip-save-state ${manualDirty ? "dirty" : saveState}`}>{manualDirty ? "待重算" : saveState === "saving" ? "保存中" : saveState === "error" ? "保存失败" : "已保存"}</span>}<span className={`source-mode ${bundle.sourceMode}`}>{bundle.sourceMode === "live" ? "实时" : bundle.sourceMode === "mixed" ? "混合" : "演示"}</span>{!readOnly && <button title="重新计算路线" onClick={recalculate}><RefreshCw /></button>}<button title="分享行程" onClick={share}><Share2 /></button><button title="导出 Excel" onClick={() => exportFile("xlsx")}><Download /></button><Link href="/trips" title="已保存行程"><BookOpenText /></Link></div>
         <div className="canvas-switch" role="group" aria-label="画布视图"><button className={mobileView === "itinerary" ? "active" : ""} onClick={() => setMobileView("itinerary")}><Route />行程</button><button className={mobileView !== "itinerary" ? "active" : ""} onClick={() => setMobileView("map")}><Map />地图</button></div>

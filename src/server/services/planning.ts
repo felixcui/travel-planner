@@ -1,5 +1,5 @@
-import type { Activity, DayPlan, Place, Plan, TripBundle, TripRequest } from "@/lib/domain";
-import { TripBundleSchema, TripRequestSchema } from "@/lib/domain";
+import type { Activity, DayPlan, Place, Plan, PlanOutline, TripBundle, TripRequest } from "@/lib/domain";
+import { PlanOutlineSchema, TripBundleSchema, TripRequestSchema } from "@/lib/domain";
 import { applyDayRules } from "@/lib/rules";
 import { isConcretePlace, requireEndpoints, routeSafety } from "@/lib/route-safety";
 import { clockToMinutes, haversine, id } from "@/lib/utils";
@@ -158,9 +158,9 @@ export async function resolvePlace(name: string, request: TripRequest) {
   return place;
 }
 
-async function buildPlan(draft: PlanDraft["plans"][number], places: Map<string, Place>, request: TripRequest, advisor: PlanningAdvisor | null): Promise<Plan> {
+async function buildPlan(draft: PlanDraft["plans"][number], places: Map<string, Place>, request: TripRequest, advisor: PlanningAdvisor | null, confirmed = false): Promise<Plan> {
   const map = new OsmMapProvider();
-  const dayDrafts = draft.days.slice(0, request.days).map((day, index) => index === request.days - 1 ? { ...day, stay: request.endPoint!, stayReason: "行程在已确认的结束地点收尾" } : day);
+  const dayDrafts = confirmed ? draft.days : draft.days.slice(0, request.days).map((day, index) => index === request.days - 1 ? { ...day, stay: request.endPoint!, stayReason: "行程在已确认的结束地点收尾" } : day);
 
   // LLM 时长分配（每套方案一次批量调用；失败回退到景点库建议时长）。
   const durationMap = new Map<number, Map<string, number>>();
@@ -209,7 +209,10 @@ async function buildPlan(draft: PlanDraft["plans"][number], places: Map<string, 
       }, request);
     };
     let finalized = await assemble(initialActivities);
-    if (finalized.intensity === "not_recommended" && initialActivities.length > 1) {
+    if (confirmed && finalized.intensity === "not_recommended") {
+      finalized.issues.push({ id: id("issue"), level: "info", code: "outline_preserved", message: "已保留确认草案的全部地点、顺序和住宿。需要调整时，请提出修改，查看变化预览并确认后再应用。" });
+    }
+    if (!confirmed && finalized.intensity === "not_recommended" && initialActivities.length > 1) {
       // 砍景点：LLM 决策移除哪个并给出理由；失败回退到原启发式（非必去中最后一个）。
       let removal: { name: string; reason: string } | null = null;
       if (advisor) {
@@ -274,10 +277,22 @@ async function buildPlan(draft: PlanDraft["plans"][number], places: Map<string, 
   };
 }
 
-export async function generateTrip(input: unknown): Promise<TripBundle> {
+export async function generateTrip(input: unknown, confirmedOutline?: PlanOutline): Promise<TripBundle> {
   const request = TripRequestSchema.parse(input);
   requireEndpoints(request);
-  const llm = createLlmProvider();
+  const outline = confirmedOutline ? PlanOutlineSchema.parse(confirmedOutline) : undefined;
+  if (outline) {
+    if (outline.days.length !== request.days || outline.days.some((day, index) => day.day !== index + 1 || !day.places.length)) {
+      throw new Error("草案的天数或每日安排与当前需求不一致，请先更新草案并重新确认");
+    }
+    if (outline.days.at(-1)?.stay.trim() !== request.endPoint?.trim()) {
+      throw new Error(`草案最后一天的住宿/结束地点“${outline.days.at(-1)?.stay}”与当前结束地点“${request.endPoint}”不一致。请先调整草案并重新确认，不会自动替换已确认地点。`);
+    }
+    for (const day of outline.days) {
+      if (!isConcretePlace(day.stay) || day.places.some((name) => !isConcretePlace(name))) throw new Error(`草案第 ${day.day} 天含未明确的地点，请先补充具体地点并重新确认`);
+    }
+  }
+  const llm = outline ? null : createLlmProvider();
   let draft = fallbackDraft(request);
   let llmLive = false;
   if (llm) {
@@ -288,11 +303,13 @@ export async function generateTrip(input: unknown): Promise<TripBundle> {
       // 保留失败状态，下方明确报错，不发布占位景点路线。
     }
   }
-  if (!llmLive) throw new Error("详细规划服务暂时不可用，请稍后重试；不会用占位景点生成正式路线。草案可继续保留和调整。");
+  if (outline) {
+    draft = { plans: [{ name: `${request.destination} · 已确认草案 v${outline.version}`, tagline: outline.summary, days: outline.days.map((day) => ({ title: day.title, places: [...day.places], stay: day.stay, stayReason: `沿用已确认草案 v${outline.version} 的安排` })) }] };
+  } else if (!llmLive) throw new Error("详细规划服务暂时不可用，请稍后重试；不会用占位景点生成正式路线。草案可继续保留和调整。");
   const allNames = draft.plans.flatMap((plan) => plan.days.flatMap((day) => day.places));
   const places = await resolvePlaces(allNames, request);
   const advisor = createPlanningAdvisor();
-  const plans = await mapLimit(draft.plans.slice(0, 1), 1, (plan) => buildPlan(plan, places, request, advisor));
+  const plans = await mapLimit(draft.plans.slice(0, 1), 1, (plan) => buildPlan(plan, places, request, advisor, Boolean(outline)));
   for (const plan of plans) {
     if (routeSafety(plan, request).blocked) {
       plan.name = `${request.destination} · 待调整方案`;
@@ -303,12 +320,14 @@ export async function generateTrip(input: unknown): Promise<TripBundle> {
   return TripBundleSchema.parse({
     schemaVersion: 2,
     id: id("trip"),
+    confirmedOutline: outline,
+    sourceOutlineVersion: outline?.version,
     request,
     plans,
     selectedPlanId: plans[0].id,
-    sourceMode: llmLive && process.env.TAVILY_API_KEY ? "live" : llmLive || process.env.TAVILY_API_KEY ? "mixed" : "demo",
+    sourceMode: outline ? "mixed" : llmLive && process.env.TAVILY_API_KEY ? "live" : llmLive || process.env.TAVILY_API_KEY ? "mixed" : "demo",
     revisions: plans.map((plan) => ({
-      id: id("revision"), planId: plan.id, version: plan.version, source: "generated", summary: "首次生成方案", createdAt: now, snapshot: plan,
+      id: id("revision"), planId: plan.id, version: plan.version, source: "generated", summary: outline ? `基于确认草案 v${outline.version} 计算详细方案` : "首次生成方案", createdAt: now, snapshot: plan,
     })),
     createdAt: now,
     updatedAt: now,

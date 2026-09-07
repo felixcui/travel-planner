@@ -104,6 +104,8 @@ describe("FileTripRepository", () => {
     value.agentSessionId = "session_private";
     value.ownerId = "owner-private";
     value.request.notes = "私人备注";
+    value.confirmedOutline = { version: 3, summary: "私人草案", days: [], highlights: [], notes: "私人偏好" };
+    value.sourceOutlineVersion = 3;
     value.request.childAges = [8];
     value.revisions = [{ id: "rev_1", planId: value.plans[0].id, version: 1, source: "generated", summary: "初始", createdAt: value.createdAt, snapshot: value.plans[0] }];
     await repository.save("secret-token", value);
@@ -112,6 +114,8 @@ describe("FileTripRepository", () => {
     expect(shared?.agentSessionId).toBeUndefined();
     expect(shared?.revisions).toEqual([]);
     expect(shared?.ownerId).toBeUndefined();
+    expect(shared?.confirmedOutline).toBeUndefined();
+    expect(shared?.sourceOutlineVersion).toBe(3);
     expect(shared?.request.notes).toBe("");
     expect(shared?.request.childAges).toEqual([]);
   });

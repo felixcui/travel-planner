@@ -13,7 +13,7 @@ import { generateTrip, recalculatePlan, resolvePlace } from "./planning";
 export const AgentTurnInputSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message"), message: z.string().trim().min(1).max(2000) }),
   z.object({ type: z.literal("create_outline") }),
-  z.object({ type: z.literal("generate") }),
+  z.object({ type: z.literal("generate"), outlineVersion: z.number().int().positive().optional() }),
   z.object({ type: z.literal("confirm_change") }),
   z.object({ type: z.literal("cancel_change") }),
   z.object({ type: z.literal("restore_revision"), revisionId: z.string() }),
@@ -34,7 +34,8 @@ function isForceConfirmText(text: string) {
 
 /** drafting 阶段的“确认草案”信号：用户明确接受当前草案、要求开始详细规划 */
 function isConfirmOutlineText(text: string) {
-  return /确认|就这样|可以了|没问题|通过|同意|定了|就这个|就这份|开始详细规划|详细规划吧|生成吧/.test(text);
+  return !/不|别|暂|还|但|改|换|增加|减少|去掉|删|调整/.test(text)
+    && /确认|就这样|可以了|没问题|通过|同意|定了|就这个|就这份|开始详细规划|详细规划吧|生成吧/.test(text);
 }
 
 function message(role: AgentMessage["role"], content: string, kind: AgentMessage["kind"] = "text", quickReplies: string[] = []): AgentMessage {
@@ -277,7 +278,8 @@ export class TravelAgentService {
   /** 详细规划并落库：单方案 TripBundle → stage editing → emit trip/session */
   private async generateIntoSession(session: AgentSession, emit: (event: AgentEvent) => void) {
     emit({ type: "progress", message: "正在核对地点与路线" });
-    let bundle = await this.tripGenerator(toRequest(session.brief));
+    if (!session.outline) throw new Error("请先生成并确认草案");
+    let bundle = await this.tripGenerator(toRequest(session.brief), session.outline);
     bundle = { ...bundle, agentSessionId: session.id };
     await this.trips.save(bundle);
     const plan = bundle.plans.find((item) => item.id === bundle.selectedPlanId) ?? bundle.plans[0];
@@ -333,7 +335,7 @@ export class TravelAgentService {
       ...session,
       brief: outcome.brief,
       stage: outcome.stage ?? session.stage,
-      outline: outcome.outline ?? (outcome.trip ? undefined : session.outline),
+      outline: outcome.outline ?? session.outline,
       tripId: trip ? trip.id : session.tripId,
       pendingChange: outcome.pendingChange ?? session.pendingChange,
       messages: [...session.messages, assistant],
@@ -478,6 +480,10 @@ export class TravelAgentService {
     }
 
     if (input.type === "generate") {
+      if (input.outlineVersion !== undefined && input.outlineVersion !== session.outline?.version) {
+        emit({ type: "session", session });
+        throw new Error("草案已更新，请查看最新草案并重新确认");
+      }
       if (session.stage === "collecting") throw new Error("请先补齐目的地和旅行天数");
 
       // 重复点击或网络重试发生在方案已生成之后时，直接返回现有结果，避免误报“请先出初步方案”。

@@ -19,7 +19,7 @@ export interface PiTurnDeps {
   /** 生成/迭代初步草案（轻量：LLM 或确定性回退，不做地理编码与路线计算） */
   generateOutline: (request: TripRequest, previous: PlanOutline | undefined, feedbackMessage?: string) => Promise<PlanOutline>;
   /** 详细规划单方案（确定性管线：地图、强度校验、知识库） */
-  generateTrip: (request: TripRequest) => Promise<TripBundle>;
+  generateTrip: (request: TripRequest, outline: PlanOutline) => Promise<TripBundle>;
   /** 计算修改预览（确定性执行：替换/增删/移动 + recalculate） */
   previewChange: (bundle: TripBundle, operations: PlanChangeOperation[]) => Promise<PlanChangeSet>;
   /** 进度事件，映射到 NDJSON progress */
@@ -292,9 +292,9 @@ export function createPiConversationRunner(): PiConversationRunner {
         async execute() {
           const missing = missingFields(effects.brief);
           if (missing.length) throw new Error(`关键信息还缺失：${missing.join("、")}。请先追问补齐。`);
-          if (!session.outline && !effects.outline) throw new Error("还没有草案。请先调用 draft_outline 让用户确认。");
+          if (!session.outline || effects.outline) throw new Error("请先展示最新草案并等待用户确认，不得直接规划尚未确认的新草案。");
           deps.onProgress("正在核对地点与路线");
-          effects.trip = await deps.generateTrip(toRequest(effects.brief));
+          effects.trip = await deps.generateTrip(toRequest(effects.brief), session.outline);
           return {
             content: [{ type: "text", text: "详细方案已生成完毕。" }],
             details: { tripId: effects.trip.id, planName: effects.trip.plans[0]?.name },
