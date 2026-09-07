@@ -267,7 +267,11 @@ export class TravelAgentService {
     if (llm) {
       try {
         const outline = await llm.generateOutline(request, previous && feedbackMessage ? { outline: previous, message: feedbackMessage } : undefined);
-        return { ...outline, version: previous ? previous.version + 1 : Math.max(1, outline.version) };
+        // 在展示并等待确认前统一终点语义；确认后的详细计算不得再改住宿。
+        const days = outline.days.map((day, index) => index === outline.days.length - 1 && request.endPoint
+          ? { ...day, stay: request.endPoint }
+          : day);
+        return { ...outline, days, version: previous ? previous.version + 1 : Math.max(1, outline.version) };
       } catch {
         // 回退确定性草案
       }
